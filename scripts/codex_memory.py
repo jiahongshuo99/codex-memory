@@ -28,27 +28,6 @@ DEFAULT_EXTRACT_MAX_BATCH_CHARS = 100_000
 DEFAULT_EXTRACT_TIMEOUT_SEC = 900
 INTERNAL_EXTRACT_ENV = "CODEX_AGENT_MEMORY_INTERNAL_EXTRACT"
 LOG_SNIPPET_CHARS = 1200
-ALLOWED_KINDS = {
-    "user_preference",
-    "user_constraint",
-    "user_profile",
-    "engineering_principle",
-    "engineering_workflow",
-    "engineering_standard",
-    "engineering_gotcha",
-    "engineering_stack_decision",
-    "workspace_overview",
-    "workspace_principle",
-    "workspace_workflow",
-    "workspace_standard",
-    "workspace_stack",
-    "workspace_gotcha",
-    "domain_concept",
-    "domain_rule",
-    "domain_decision",
-    "domain_gotcha",
-}
-ALLOWED_OPERATIONS = {"append_bullet"}
 WORKSPACE_KEY_PATTERN = re.compile(r"codex-agent-memory workspace-key:\s*([a-z0-9-]+)")
 WORKSPACE_MARKER_TEMPLATE = "<!-- codex-agent-memory workspace-key: {key} -->"
 PROTOCOL_TEMPLATE = (
@@ -487,11 +466,8 @@ def canonical_path(root: Path, target_file: str) -> Path:
 
 def validate_candidate(candidate: Dict[str, Any], root: Path) -> Path:
     kind = candidate.get("kind")
-    operation = candidate.get("operation")
-    if kind not in ALLOWED_KINDS:
+    if kind not in allowed_kinds():
         raise CliError(f"unsupported candidate kind: {kind}")
-    if operation not in ALLOWED_OPERATIONS:
-        raise CliError(f"unsupported operation: {operation}")
     content = candidate.get("content", "").strip()
     if not content:
         raise CliError("candidate content is empty")
@@ -676,11 +652,11 @@ def extraction_prompt(entries: List[Dict[str, Any]], root: Path) -> str:
     return (
         f"{structure}\n\n"
         f"{rules}\n\n"
-        "所有写入 canonical/ 的记忆内容和 reason 必须使用中文；如果原文是英文，也要提炼成自然中文。\n"
+        "所有写入 canonical/ 的记忆内容必须使用中文；如果原文是英文，也要提炼成自然中文。\n"
         "生成候选前必须先检查下面的现有 canonical 记忆；如果已有相同或相近内容，不要重复输出候选。"
         "只有确实有新增信息时，才输出可合并后的新候选内容。\n"
-        "Return only JSON with top-level keys `candidates` and `ignored`.\n"
-        "Each candidate must use operation `append_bullet` and a target_file under canonical/.\n\n"
+        "Return only JSON that conforms to assets/extraction-output.schema.json.\n"
+        "Each candidate must use a target_file under canonical/.\n\n"
         "Existing canonical memory:\n"
         f"{canonical_snapshot(root)}\n\n"
         "Inbox entries:\n"
@@ -713,6 +689,18 @@ def read_plugin_asset(name: str) -> str:
     if path.exists():
         return path.read_text(encoding="utf-8")
     return ""
+
+
+def plugin_asset_path(name: str) -> Path:
+    return Path(__file__).resolve().parents[1] / "assets" / name
+
+
+def output_schema() -> Dict[str, Any]:
+    return json.loads(read_plugin_asset("extraction-output.schema.json"))
+
+
+def allowed_kinds() -> set[str]:
+    return set(output_schema()["properties"]["candidates"]["items"]["properties"]["kind"]["enum"])
 
 
 def extract_model(args: argparse.Namespace) -> str:
@@ -751,6 +739,7 @@ def run_codex_extraction(
         prompt_path = fh.name
     output_path = tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=".json", delete=False)
     output_path.close()
+    schema_path = plugin_asset_path("extraction-output.schema.json")
     command = [
         codex_cmd,
         "exec",
@@ -760,6 +749,8 @@ def run_codex_extraction(
         model,
         "-c",
         f'model_reasoning_effort="{effort}"',
+        "--output-schema",
+        str(schema_path),
         "--output-last-message",
         output_path.name,
         "-",

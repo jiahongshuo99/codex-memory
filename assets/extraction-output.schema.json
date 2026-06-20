@@ -1,0 +1,73 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Codex Agent Memory Extraction Output",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["candidates", "ignored"],
+  "properties": {
+    "candidates": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["kind", "target_file", "content", "source_ids"],
+        "properties": {
+          "kind": {
+            "type": "string",
+            "enum": [
+              "user_preference",
+              "user_constraint",
+              "user_profile",
+              "engineering_principle",
+              "engineering_workflow",
+              "engineering_standard",
+              "engineering_gotcha",
+              "engineering_stack_decision",
+              "workspace_overview",
+              "workspace_principle",
+              "workspace_workflow",
+              "workspace_standard",
+              "workspace_stack",
+              "workspace_gotcha",
+              "domain_concept",
+              "domain_rule",
+              "domain_decision",
+              "domain_gotcha"
+            ]
+          },
+          "target_file": {
+            "type": "string",
+            "pattern": "^canonical/.+\\.md$"
+          },
+          "content": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 500
+          },
+          "source_ids": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        }
+      }
+    },
+    "ignored": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["source_id"],
+        "properties": {
+          "source_id": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    }
+  }
+}

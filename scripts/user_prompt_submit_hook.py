@@ -26,7 +26,7 @@ def filter_reason(prompt: str) -> Optional[str]:
         "# Codex Agent Memory Extraction Rules",
         "Existing canonical memory:",
         "Inbox entries:",
-        "Return only JSON with top-level keys `candidates` and `ignored`",
+        "assets/extraction-output.schema.json",
     ]
     marker_count = sum(1 for marker in memory_prompt_markers if marker in prompt)
     if stripped.startswith("# Codex Agent Memory Structure") and marker_count >= 3:

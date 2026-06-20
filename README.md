@@ -143,9 +143,13 @@ codex exec \
   --skip-git-repo-check \
   --model gpt-5.4 \
   -c 'model_reasoning_effort="medium"' \
+  --output-schema <plugin>/assets/extraction-output.schema.json \
   --output-last-message <tmp-output.json> \
   -
 ```
+
+The extraction output contract is defined once in `assets/extraction-output.schema.json`; prompts and
+rules reference that schema instead of duplicating the response shape.
 
 The default extraction model is `gpt-5.4` with `medium` reasoning effort. Override with
 `--model`, `--effort`, `CODEX_AGENT_MEMORY_EXTRACT_MODEL`, or `CODEX_AGENT_MEMORY_EXTRACT_EFFORT`.

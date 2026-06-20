@@ -2,7 +2,7 @@
 
 Extract only durable memory with high future reuse value.
 
-所有写入 `canonical/` 的记忆内容、`reason` 和说明性字段必须使用中文；如果源内容是英文，也要提炼成自然中文。
+所有写入 `canonical/` 的记忆内容必须使用中文；如果源内容是英文，也要提炼成自然中文。
 
 Before choosing a `target_file`, follow `assets/memory-structure.md`. Canonical memory is split into four modules:
 
@@ -54,49 +54,6 @@ Do not keep:
 - Topic notes that only explain the current conversation.
 - Domain claims that are weak inferences rather than explicit or well-supported decisions.
 
-## Output Schema
+## Output Contract
 
-Return only JSON:
-
-```json
-{
-  "candidates": [
-    {
-      "kind": "user_preference",
-      "target_file": "canonical/user/preferences.md",
-      "operation": "append_bullet",
-      "content": "用一句中文写成的稳定用户偏好。",
-      "source_ids": ["up_..."],
-      "confidence": "high",
-      "reason": "说明这条记忆为什么具有长期复用价值。"
-    }
-  ],
-  "ignored": [
-    {
-      "source_id": "up_...",
-      "reason": "过于具体、临时，或不适合作为长期记忆。"
-    }
-  ]
-}
-```
-
-Allowed `kind` values:
-
-- `user_preference`
-- `user_constraint`
-- `user_profile`
-- `engineering_principle`
-- `engineering_workflow`
-- `engineering_standard`
-- `engineering_gotcha`
-- `engineering_stack_decision`
-- `workspace_overview`
-- `workspace_principle`
-- `workspace_workflow`
-- `workspace_standard`
-- `workspace_stack`
-- `workspace_gotcha`
-- `domain_concept`
-- `domain_rule`
-- `domain_decision`
-- `domain_gotcha`
+Return only JSON that conforms to `assets/extraction-output.schema.json`.

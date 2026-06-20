@@ -207,7 +207,7 @@ class CodexMemoryCliTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("Codex Agent Memory Structure", result.stdout)
         self.assertIn("canonical/domains/<domain-key>/", result.stdout)
-        self.assertIn("所有写入 canonical/ 的记忆内容和 reason 必须使用中文", result.stdout)
+        self.assertIn("assets/extraction-output.schema.json", result.stdout)
 
     def test_apply_plan_accepts_domain_memory_kind(self):
         plan = {
@@ -215,11 +215,8 @@ class CodexMemoryCliTests(unittest.TestCase):
                 {
                     "kind": "domain_decision",
                     "target_file": "canonical/domains/agent-memory/decisions.md",
-                    "operation": "append_bullet",
                     "content": "Canonical memory is split into user, engineering, workspaces, and domains.",
                     "source_ids": ["up_domain_1"],
-                    "confidence": "high",
-                    "reason": "explicit structure decision",
                 }
             ],
             "ignored": [],
@@ -333,6 +330,8 @@ class CodexMemoryCliTests(unittest.TestCase):
         self.assertIn("--model", argv)
         self.assertEqual(argv[argv.index("--model") + 1], "gpt-5.4")
         self.assertIn('model_reasoning_effort="medium"', argv)
+        self.assertIn("--output-schema", argv)
+        self.assertTrue(argv[argv.index("--output-schema") + 1].endswith("assets/extraction-output.schema.json"))
         self.assertIn("--output-last-message", argv)
 
     def test_extract_run_commits_memory_changes_to_git(self):
@@ -344,7 +343,7 @@ class CodexMemoryCliTests(unittest.TestCase):
             "#!/usr/bin/env python3\n"
             "import json, pathlib, sys\n"
             "out = pathlib.Path(sys.argv[sys.argv.index('--output-last-message') + 1])\n"
-            f"out.write_text(json.dumps({{'candidates': [], 'ignored': [{{'source_id': {entry_id!r}, 'reason': 'test'}}]}}), encoding='utf-8')\n",
+            f"out.write_text(json.dumps({{'candidates': [], 'ignored': [{{'source_id': {entry_id!r}}}]}}), encoding='utf-8')\n",
             encoding="utf-8",
         )
         fake_codex.chmod(0o755)
@@ -389,7 +388,7 @@ class CodexMemoryCliTests(unittest.TestCase):
             "calls.write_text(calls.read_text(encoding='utf-8') + json.dumps({'chars': len(prompt), 'ids': re.findall(r'up_[A-Za-z0-9T+_:-]+', prompt)}) + '\\n' if calls.exists() else json.dumps({'chars': len(prompt), 'ids': re.findall(r'up_[A-Za-z0-9T+_:-]+', prompt)}) + '\\n', encoding='utf-8')\n"
             "ids = sorted(set(re.findall(r'up_[A-Za-z0-9T+_:-]+', prompt)))\n"
             "out = pathlib.Path(sys.argv[sys.argv.index('--output-last-message') + 1])\n"
-            "out.write_text(json.dumps({'candidates': [], 'ignored': [{'source_id': i, 'reason': 'test'} for i in ids]}), encoding='utf-8')\n",
+            "out.write_text(json.dumps({'candidates': [], 'ignored': [{'source_id': i} for i in ids]}), encoding='utf-8')\n",
             encoding="utf-8",
         )
         fake_codex.chmod(0o755)
@@ -562,7 +561,7 @@ class CodexMemoryCliTests(unittest.TestCase):
         prompt = (
             "<hook_prompt hook_run_id=\"stop:1:/tmp/hooks.json\">"
             "# Codex Agent Memory Structure\nExisting canonical memory:\nInbox entries:\n"
-            "Return only JSON with top-level keys `candidates` and `ignored`."
+            "Return only JSON that conforms to assets/extraction-output.schema.json."
             "</hook_prompt>"
         )
 
@@ -708,11 +707,8 @@ class CodexMemoryCliTests(unittest.TestCase):
                 {
                     "kind": "user_preference",
                     "target_file": "../outside.md",
-                    "operation": "append_bullet",
                     "content": "Bad write",
                     "source_ids": ["up_1"],
-                    "confidence": "high",
-                    "reason": "test",
                 }
             ],
             "ignored": [],
@@ -729,17 +725,13 @@ class CodexMemoryCliTests(unittest.TestCase):
                 {
                     "kind": "user_preference",
                     "target_file": "canonical/user/preferences.md",
-                    "operation": "append_bullet",
                     "content": "用户偏好架构讨论先给整体流程。",
                     "source_ids": ["up_20260620_1"],
-                    "confidence": "high",
-                    "reason": "explicit preference",
                 }
             ],
             "ignored": [
                 {
                     "source_id": "up_20260620_2",
-                    "reason": "too specific",
                 }
             ],
         }
@@ -776,11 +768,8 @@ class CodexMemoryCliTests(unittest.TestCase):
                 {
                     "kind": "user_preference",
                     "target_file": "canonical/user/preferences.md",
-                    "operation": "append_bullet",
                     "content": "用户偏好短回答",
                     "source_ids": ["up_dup"],
-                    "confidence": "high",
-                    "reason": "duplicate",
                 }
             ],
             "ignored": [],
@@ -790,11 +779,8 @@ class CodexMemoryCliTests(unittest.TestCase):
                 {
                     "kind": "user_preference",
                     "target_file": "canonical/user/preferences.md",
-                    "operation": "append_bullet",
                     "content": "用户偏好短回答，并希望回答直接给结论。",
                     "source_ids": ["up_update"],
-                    "confidence": "high",
-                    "reason": "new detail",
                 }
             ],
             "ignored": [],
@@ -814,26 +800,19 @@ class CodexMemoryCliTests(unittest.TestCase):
                 {
                     "kind": "user_preference",
                     "target_file": "canonical/user/preferences.md",
-                    "operation": "append_bullet",
                     "content": "用户偏好短回答。",
                     "source_ids": ["up_1"],
-                    "confidence": "high",
-                    "reason": "explicit",
                 },
                 {
                     "kind": "engineering_principle",
                     "target_file": "canonical/engineering/principles.md",
-                    "operation": "append_bullet",
                     "content": "CLI 负责可靠性。",
                     "source_ids": ["up_1", "up_2"],
-                    "confidence": "high",
-                    "reason": "explicit",
                 },
             ],
             "ignored": [
                 {
                     "source_id": "up_3",
-                    "reason": "too specific",
                 }
             ],
         }
