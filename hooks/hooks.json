@@ -5,7 +5,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 scripts/user_prompt_submit_hook.py",
+            "command": "python3 /Users/jiahongshuo/Repos/codex-memory/scripts/user_prompt_submit_hook.py",
             "timeout": 10,
             "statusMessage": "Recording memory inbox"
           }
@@ -17,7 +17,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 scripts/stop_hook.py",
+            "command": "python3 /Users/jiahongshuo/Repos/codex-memory/scripts/stop_hook.py",
             "timeout": 600,
             "statusMessage": "Extracting memory"
           }
