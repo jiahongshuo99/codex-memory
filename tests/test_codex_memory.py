@@ -190,6 +190,7 @@ class CodexMemoryCliTests(unittest.TestCase):
 
     def test_stop_hook_is_disabled_by_default(self):
         env = {**os.environ, "CODEX_AGENT_MEMORY_ROOT": str(self.tmp_path / "memory")}
+        env.pop("CODEX_AGENT_MEMORY_EXTRACT_ON_STOP", None)
         result = subprocess.run(
             [sys.executable, str(STOP_HOOK)],
             input=json.dumps({"hook_event_name": "Stop", "turn_id": "turn-1"}),
@@ -236,6 +237,8 @@ class CodexMemoryCliTests(unittest.TestCase):
     def test_hooks_do_not_write_flow_log_when_debug_is_disabled(self):
         memory_root = self.tmp_path / "memory"
         env = {**os.environ, "CODEX_AGENT_MEMORY_ROOT": str(memory_root)}
+        env.pop("CODEX_AGENT_MEMORY_DEBUG", None)
+        env.pop("CODEX_AGENT_MEMORY_EXTRACT_ON_STOP", None)
         result = subprocess.run(
             [sys.executable, str(USER_PROMPT_HOOK)],
             input=json.dumps(
@@ -262,6 +265,7 @@ class CodexMemoryCliTests(unittest.TestCase):
             "CODEX_AGENT_MEMORY_ROOT": str(memory_root),
             "CODEX_AGENT_MEMORY_DEBUG": "1",
         }
+        env.pop("CODEX_AGENT_MEMORY_EXTRACT_ON_STOP", None)
         user_prompt = subprocess.run(
             [sys.executable, str(USER_PROMPT_HOOK)],
             input=json.dumps(
@@ -290,6 +294,8 @@ class CodexMemoryCliTests(unittest.TestCase):
         self.assertEqual(stop.returncode, 0, stop.stderr)
         rows = read_jsonl(memory_root / "system" / "hook-flow.jsonl")
         self.assertEqual([row["hook"] for row in rows], ["UserPromptSubmit", "Stop"])
+        self.assertTrue(rows[0]["ts"].endswith("+08:00"))
+        self.assertTrue(rows[1]["ts"].endswith("+08:00"))
         self.assertEqual(rows[0]["status"], "ok")
         self.assertEqual(rows[0]["session_id"], "sess-1")
         self.assertEqual(rows[0]["turn_id"], "turn-1")

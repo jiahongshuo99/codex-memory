@@ -5,14 +5,16 @@ from __future__ import annotations
 
 import json
 import os
+import datetime as dt
 from pathlib import Path
 from typing import Any, Dict, Optional
 
-from codex_memory import append_jsonl, iso_now, memory_root, workspace_key
+from codex_memory import append_jsonl, memory_root, workspace_key
 
 
 TRUE_VALUES = {"1", "true", "yes", "on"}
 FLOW_LOG_FILE = "hook-flow.jsonl"
+BEIJING_TZ = dt.timezone(dt.timedelta(hours=8))
 
 
 def debug_enabled() -> bool:
@@ -39,6 +41,10 @@ def text_snippet(text: Optional[str], *, limit: int = 500) -> Optional[str]:
     return stripped[: limit - 3] + "..."
 
 
+def beijing_now() -> str:
+    return dt.datetime.now(BEIJING_TZ).isoformat(timespec="seconds")
+
+
 def write_flow_log(record: Dict[str, Any]) -> None:
     if not debug_enabled():
         return
@@ -46,7 +52,7 @@ def write_flow_log(record: Dict[str, Any]) -> None:
     try:
         root = memory_root()
         payload = {
-            "ts": iso_now(),
+            "ts": beijing_now(),
             "debug": True,
             **record,
         }
