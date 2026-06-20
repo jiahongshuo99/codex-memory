@@ -5,10 +5,12 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import difflib
 import fcntl
 import hashlib
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -18,6 +20,7 @@ from typing import Any, Dict, Iterable, List, Optional, TextIO
 
 DEFAULT_ROOT = Path.home() / ".codex" / "codex-agent-memory"
 INBOX_FILE = "user-prompts.jsonl"
+EXTRACT_JOBS_FILE = "extract-jobs.jsonl"
 ALLOWED_KINDS = {
     "user_preference",
     "user_constraint",
@@ -39,6 +42,8 @@ ALLOWED_KINDS = {
     "domain_gotcha",
 }
 ALLOWED_OPERATIONS = {"append_bullet"}
+WORKSPACE_KEY_PATTERN = re.compile(r"codex-agent-memory workspace-key:\s*([a-z0-9-]+)")
+WORKSPACE_MARKER_TEMPLATE = "<!-- codex-agent-memory workspace-key: {key} -->"
 PROTOCOL_TEMPLATE = (
     "Memory root: {root}\n"
     "If memory may help, read only relevant files under canonical/. "
@@ -79,11 +84,33 @@ def read_stdin_text() -> str:
     return sys.stdin.read().strip()
 
 
+def slugify_key(value: str) -> str:
+    slug = re.sub(r"[^a-z0-9]+", "-", value.lower())
+    slug = re.sub(r"-+", "-", slug).strip("-")
+    return slug or "workspace"
+
+
 def workspace_key(cwd: Optional[str]) -> Optional[str]:
     if not cwd:
         return None
-    name = Path(cwd).expanduser().resolve().name
-    return name or None
+    path = Path(cwd).expanduser().resolve()
+    name = path.name or "workspace"
+    key = slugify_key(name)
+    if not path.exists() or not path.is_dir():
+        return key
+
+    agents_path = path / "AGENTS.md"
+    if agents_path.exists():
+        text = agents_path.read_text(encoding="utf-8")
+        match = WORKSPACE_KEY_PATTERN.search(text)
+        if match:
+            return match.group(1)
+        if text and not text.endswith("\n"):
+            text += "\n"
+        agents_path.write_text(text + "\n" + WORKSPACE_MARKER_TEMPLATE.format(key=key) + "\n", encoding="utf-8")
+    else:
+        agents_path.write_text(WORKSPACE_MARKER_TEMPLATE.format(key=key) + "\n", encoding="utf-8")
+    return key
 
 
 def make_id(source: str, text: str, timestamp: str, session_id: Optional[str], turn_id: Optional[str]) -> str:
@@ -221,6 +248,43 @@ def command_extract_log(args: argparse.Namespace) -> int:
     return 0
 
 
+def append_job_event(root: Path, event: Dict[str, Any]) -> None:
+    append_jsonl(root / "system" / EXTRACT_JOBS_FILE, event)
+
+
+def latest_jobs(root: Path) -> List[Dict[str, Any]]:
+    latest: Dict[str, Dict[str, Any]] = {}
+    order: List[str] = []
+    for event in read_jsonl(root / "system" / EXTRACT_JOBS_FILE):
+        job_id = event.get("job_id")
+        if not job_id:
+            continue
+        if job_id not in latest:
+            latest[job_id] = {"job_id": job_id}
+            order.append(job_id)
+        latest[job_id].update(event)
+    return [latest[job_id] for job_id in order]
+
+
+def command_extract_jobs(args: argparse.Namespace) -> int:
+    root = memory_root()
+    ensure_base(root)
+    jobs = latest_jobs(root)
+    counts: Dict[str, int] = {}
+    for job in jobs:
+        status = job.get("status", "unknown")
+        counts[status] = counts.get(status, 0) + 1
+    payload = {"counts": counts, "jobs": jobs}
+    if args.json:
+        print(json.dumps(payload, ensure_ascii=False))
+    else:
+        for status, count in sorted(counts.items()):
+            print(f"{status}: {count}")
+        for job in jobs:
+            print(f"{job.get('job_id')} {job.get('status')} pid={job.get('pid', '')}")
+    return 0
+
+
 def canonical_path(root: Path, target_file: str) -> Path:
     if target_file.startswith("/") or ".." in Path(target_file).parts:
         raise CliError(f"target_file is outside canonical tree: {target_file}")
@@ -252,21 +316,72 @@ def validate_candidate(candidate: Dict[str, Any], root: Path) -> Path:
     return canonical_path(root, candidate.get("target_file", ""))
 
 
-def append_bullet(path: Path, content: str, source_ids: Iterable[str], reason: str) -> None:
+def memory_title(path: Path) -> str:
+    titles = {
+        "preferences": "偏好",
+        "constraints": "约束",
+        "profile": "用户资料",
+        "overview": "概览",
+        "principles": "原则",
+        "workflows": "工作流",
+        "standards": "标准",
+        "stack": "技术栈",
+        "stack-decisions": "技术栈决策",
+        "gotchas": "易错点",
+        "concepts": "概念",
+        "rules": "规则",
+        "decisions": "决策",
+    }
+    if path.stem in titles:
+        return titles[path.stem]
+    return path.stem.replace("-", " ").replace("_", " ").title()
+
+
+def normalized_memory(value: str) -> str:
+    return re.sub(r"[\W_]+", "", value.lower())
+
+
+def is_similar_memory(existing: str, candidate: str) -> bool:
+    existing_norm = normalized_memory(existing)
+    candidate_norm = normalized_memory(candidate)
+    if not existing_norm or not candidate_norm:
+        return False
+    if existing_norm in candidate_norm or candidate_norm in existing_norm:
+        return True
+    return difflib.SequenceMatcher(None, existing_norm, candidate_norm).ratio() >= 0.86
+
+
+def upsert_bullet(path: Path, content: str) -> bool:
     path.parent.mkdir(parents=True, exist_ok=True)
     if not path.exists():
-        title = path.stem.replace("-", " ").replace("_", " ").title()
-        path.write_text(f"# {title}\n\n", encoding="utf-8")
+        path.write_text(f"# {memory_title(path)}\n\n", encoding="utf-8")
     existing = path.read_text(encoding="utf-8")
-    bullet = f"- {content}\n  Source: {', '.join(source_ids)}"
-    if reason:
-        bullet += f"\n  Reason: {reason}"
-    bullet += "\n"
-    if bullet not in existing:
-        with path.open("a", encoding="utf-8") as fh:
-            if existing and not existing.endswith("\n"):
-                fh.write("\n")
-            fh.write(bullet)
+    lines = existing.splitlines()
+    candidate = content.strip()
+    candidate_line = f"- {candidate}"
+
+    for index, line in enumerate(lines):
+        if not line.startswith("- "):
+            continue
+        current = line[2:].strip()
+        if not is_similar_memory(current, candidate):
+            continue
+        if normalized_memory(candidate) in normalized_memory(current):
+            return False
+        end = index + 1
+        while end < len(lines) and lines[end].startswith("  "):
+            end += 1
+        lines[index:end] = [candidate_line]
+        path.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
+        return True
+
+    with path.open("a", encoding="utf-8") as fh:
+        if existing and not existing.endswith("\n"):
+            fh.write("\n")
+        if existing.strip():
+            fh.write("\n")
+        fh.write(candidate_line + "\n")
+    return True
 
 
 def write_checkpoint(root: Path, processed_source_ids: List[str]) -> None:
@@ -332,12 +447,7 @@ def command_plan_apply(args: argparse.Namespace) -> int:
     processed_source_ids: List[str] = []
     for candidate in plan.get("candidates", []):
         path = validate_candidate(candidate, root)
-        append_bullet(
-            path,
-            candidate["content"].strip(),
-            candidate["source_ids"],
-            candidate.get("reason", "").strip(),
-        )
+        changed = upsert_bullet(path, candidate["content"].strip())
         for source_id in candidate["source_ids"]:
             processed_source_ids.append(source_id)
             append_jsonl(
@@ -350,7 +460,8 @@ def command_plan_apply(args: argparse.Namespace) -> int:
                     "processed_at": iso_now(),
                 },
             )
-        applied.append(candidate)
+        if changed:
+            applied.append(candidate)
     for item in plan.get("ignored", []):
         source_id = item.get("source_id")
         if source_id:
@@ -378,11 +489,36 @@ def extraction_prompt(entries: List[Dict[str, Any]], root: Path) -> str:
     return (
         f"{structure}\n\n"
         f"{rules}\n\n"
+        "所有写入 canonical/ 的记忆内容和 reason 必须使用中文；如果原文是英文，也要提炼成自然中文。\n"
+        "生成候选前必须先检查下面的现有 canonical 记忆；如果已有相同或相近内容，不要重复输出候选。"
+        "只有确实有新增信息时，才输出可合并后的新候选内容。\n"
         "Return only JSON with top-level keys `candidates` and `ignored`.\n"
         "Each candidate must use operation `append_bullet` and a target_file under canonical/.\n\n"
+        "Existing canonical memory:\n"
+        f"{canonical_snapshot(root)}\n\n"
         "Inbox entries:\n"
         f"{json.dumps(entries, ensure_ascii=False, indent=2)}\n"
     )
+
+
+def canonical_snapshot(root: Path, *, limit: int = 20000) -> str:
+    canonical = root / "canonical"
+    if not canonical.exists():
+        return "(empty)"
+    parts: List[str] = []
+    total = 0
+    for path in sorted(canonical.rglob("*.md")):
+        rel = path.relative_to(root)
+        text = path.read_text(encoding="utf-8").strip()
+        if not text:
+            continue
+        chunk = f"## {rel}\n{text}\n"
+        if total + len(chunk) > limit:
+            parts.append("(truncated)")
+            break
+        parts.append(chunk)
+        total += len(chunk)
+    return "\n".join(parts) if parts else "(empty)"
 
 
 def read_plugin_asset(name: str) -> str:
@@ -395,6 +531,9 @@ def read_plugin_asset(name: str) -> str:
 def command_extract_run(args: argparse.Namespace) -> int:
     root = memory_root()
     ensure_base(root)
+    job_id = getattr(args, "job_id", None)
+    if job_id:
+        append_job_event(root, {"job_id": job_id, "status": "running", "running_at": iso_now()})
     if args.dry_run:
         entries = pending_entries(root)
         if args.limit:
@@ -403,6 +542,17 @@ def command_extract_run(args: argparse.Namespace) -> int:
         claim = claim_entries(root, args.limit)
         entries = claim["entries"]
     if not entries:
+        if job_id:
+            append_job_event(
+                root,
+                {
+                    "job_id": job_id,
+                    "status": "succeeded",
+                    "finished_at": iso_now(),
+                    "returncode": 0,
+                    "message": "no_pending_entries",
+                },
+            )
         print(json.dumps({"status": "no_pending_entries"}, ensure_ascii=False))
         return 0
     prompt = extraction_prompt(entries, root)
@@ -424,14 +574,87 @@ def command_extract_run(args: argparse.Namespace) -> int:
     finally:
         Path(prompt_path).unlink(missing_ok=True)
     if run.returncode != 0:
+        if job_id:
+            append_job_event(
+                root,
+                {
+                    "job_id": job_id,
+                    "status": "failed",
+                    "finished_at": iso_now(),
+                    "returncode": run.returncode,
+                    "error": run.stderr.strip() or "codex extraction command failed",
+                },
+            )
         raise CliError(run.stderr.strip() or "codex extraction command failed")
     try:
         plan = json.loads(run.stdout)
     except json.JSONDecodeError as exc:
+        if job_id:
+            append_job_event(
+                root,
+                {
+                    "job_id": job_id,
+                    "status": "failed",
+                    "finished_at": iso_now(),
+                    "returncode": 1,
+                    "error": f"Codex CLI did not return JSON: {exc}",
+                },
+            )
         raise CliError(f"Codex CLI did not return JSON: {exc}") from exc
     raw = json.dumps(plan, ensure_ascii=False)
     sys.stdin = _StringStdin(raw)
-    return command_plan_apply(argparse.Namespace(stdin=True, file=None))
+    result = command_plan_apply(argparse.Namespace(stdin=True, file=None))
+    if job_id:
+        append_job_event(
+            root,
+            {
+                "job_id": job_id,
+                "status": "succeeded" if result == 0 else "failed",
+                "finished_at": iso_now(),
+                "returncode": result,
+            },
+        )
+    return result
+
+
+def command_extract_start(args: argparse.Namespace) -> int:
+    root = memory_root()
+    ensure_base(root)
+    job_id = make_batch_id().replace("batch_", "job_", 1)
+    log_dir = root / "system" / "extract-jobs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    stdout_path = log_dir / f"{job_id}.stdout.log"
+    stderr_path = log_dir / f"{job_id}.stderr.log"
+    cmd = [sys.executable, str(Path(__file__).resolve()), "extract", "run", "--job-id", job_id]
+    if args.limit:
+        cmd.extend(["--limit", str(args.limit)])
+    if args.codex_command:
+        cmd.extend(["--codex-command", args.codex_command])
+    stdout_fh = stdout_path.open("a", encoding="utf-8")
+    stderr_fh = stderr_path.open("a", encoding="utf-8")
+    process = subprocess.Popen(
+        cmd,
+        stdout=stdout_fh,
+        stderr=stderr_fh,
+        stdin=subprocess.DEVNULL,
+        start_new_session=True,
+        close_fds=True,
+        env=os.environ.copy(),
+    )
+    stdout_fh.close()
+    stderr_fh.close()
+    job = {
+        "job_id": job_id,
+        "pid": process.pid,
+        "status": "started",
+        "started_at": iso_now(),
+        "command": cmd,
+        "stdout_log": str(stdout_path),
+        "stderr_log": str(stderr_path),
+    }
+    append_job_event(root, job)
+    print(json.dumps(job, ensure_ascii=False))
+    return 0
 
 
 class _StringStdin:
@@ -483,7 +706,15 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--dry-run", action="store_true")
     run.add_argument("--limit", type=int)
     run.add_argument("--codex-command")
+    run.add_argument("--job-id")
     run.set_defaults(func=command_extract_run)
+    start = extract_sub.add_parser("start")
+    start.add_argument("--limit", type=int)
+    start.add_argument("--codex-command")
+    start.set_defaults(func=command_extract_start)
+    jobs = extract_sub.add_parser("jobs")
+    jobs.add_argument("--json", action="store_true")
+    jobs.set_defaults(func=command_extract_jobs)
     return parser
 
 

@@ -38,7 +38,7 @@ def main() -> int:
     log_record = {
         "hook": "Stop",
         "script": str(Path(__file__).resolve()),
-        "action": "extract_run",
+        "action": "extract_start",
         "turn_id": payload.get("turn_id"),
     }
     if not enabled():
@@ -49,7 +49,7 @@ def main() -> int:
         return 0
 
     limit = os.environ.get("CODEX_AGENT_MEMORY_EXTRACT_LIMIT", "50")
-    cmd = [cli_command(), "extract", "run", "--limit", limit]
+    cmd = [cli_command(), "extract", "start", "--limit", limit]
     codex_command = os.environ.get("CODEX_AGENT_MEMORY_CODEX_COMMAND")
     if codex_command:
         cmd.extend(["--codex-command", codex_command])

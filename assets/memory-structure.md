@@ -203,15 +203,12 @@ If unsure whether a memory is workspace-specific or generally reusable, prefer t
 Use short Markdown bullets:
 
 ```md
-- CLI should handle deterministic reliability concerns; agents should handle semantic extraction decisions.
-  Source: up_20260620...
-  Confidence: high
+- CLI 负责确定性的可靠性逻辑，agent 负责语义提取判断。
 ```
 
 Guidelines:
 
 - One durable idea per bullet.
 - Keep content concise.
-- Include source IDs.
-- Include confidence when available.
+- 不要在 canonical 记忆中写来源、原因、置信度等元数据；这些属于 system 日志。
 - Avoid long summaries, raw transcripts, and narrow one-off case details.

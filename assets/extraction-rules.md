@@ -2,6 +2,8 @@
 
 Extract only durable memory with high future reuse value.
 
+所有写入 `canonical/` 的记忆内容、`reason` 和说明性字段必须使用中文；如果源内容是英文，也要提炼成自然中文。
+
 Before choosing a `target_file`, follow `assets/memory-structure.md`. Canonical memory is split into four modules:
 
 - `canonical/user/`
@@ -63,16 +65,16 @@ Return only JSON:
       "kind": "user_preference",
       "target_file": "canonical/user/preferences.md",
       "operation": "append_bullet",
-      "content": "User preference written as one durable sentence.",
+      "content": "用一句中文写成的稳定用户偏好。",
       "source_ids": ["up_..."],
       "confidence": "high",
-      "reason": "Why this has future reuse value."
+      "reason": "说明这条记忆为什么具有长期复用价值。"
     }
   ],
   "ignored": [
     {
       "source_id": "up_...",
-      "reason": "Too specific, temporary, or not suitable for durable memory."
+      "reason": "过于具体、临时，或不适合作为长期记忆。"
     }
   ]
 }

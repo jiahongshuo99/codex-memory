@@ -54,6 +54,8 @@ class CodexMemoryCliTests(unittest.TestCase):
         self.tmp.cleanup()
 
     def test_inbox_append_writes_user_prompt_jsonl_with_stable_metadata(self):
+        project = self.tmp_path / "example-repo"
+        project.mkdir()
         result = run_cli(
             self.tmp_path,
             "inbox",
@@ -65,7 +67,7 @@ class CodexMemoryCliTests(unittest.TestCase):
             "--turn-id",
             "turn-1",
             "--cwd",
-            "/tmp/example-repo",
+            str(project),
             input_text="记住我喜欢短回答\n",
         )
 
@@ -85,9 +87,37 @@ class CodexMemoryCliTests(unittest.TestCase):
         self.assertEqual(entries[0]["session_id"], "sess-1")
         self.assertEqual(entries[0]["codex_session_id"], "sess-1")
         self.assertEqual(entries[0]["turn_id"], "turn-1")
-        self.assertEqual(entries[0]["cwd"], "/tmp/example-repo")
+        self.assertEqual(entries[0]["cwd"], str(project))
         self.assertEqual(entries[0]["workspace_key"], "example-repo")
         self.assertEqual(entries[0]["text"], "记住我喜欢短回答")
+        agents_text = (project / "AGENTS.md").read_text(encoding="utf-8")
+        self.assertIn("codex-agent-memory workspace-key: example-repo", agents_text)
+
+    def test_workspace_key_reuses_project_agents_file(self):
+        project = self.tmp_path / "Readable Project"
+        project.mkdir()
+        agents = project / "AGENTS.md"
+        agents.write_text(
+            "# Project Instructions\n\n"
+            "<!-- codex-agent-memory workspace-key: readable-project -->\n",
+            encoding="utf-8",
+        )
+
+        result = run_cli(
+            self.tmp_path,
+            "inbox",
+            "append",
+            "--source",
+            "user_prompt",
+            "--cwd",
+            str(project),
+            input_text="hello",
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        entries = read_jsonl(self.tmp_path / "memory" / "inbox" / "user-prompts.jsonl")
+        self.assertEqual(entries[0]["workspace_key"], "readable-project")
+        self.assertEqual(agents.read_text(encoding="utf-8").count("codex-agent-memory workspace-key"), 1)
 
     def test_inbox_append_accepts_explicit_codex_session_id(self):
         result = run_cli(
@@ -165,6 +195,7 @@ class CodexMemoryCliTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("Codex Agent Memory Structure", result.stdout)
         self.assertIn("canonical/domains/<domain-key>/", result.stdout)
+        self.assertIn("所有写入 canonical/ 的记忆内容和 reason 必须使用中文", result.stdout)
 
     def test_apply_plan_accepts_domain_memory_kind(self):
         plan = {
@@ -203,7 +234,7 @@ class CodexMemoryCliTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout.strip(), "")
 
-    def test_stop_hook_runs_sync_extraction_when_enabled(self):
+    def test_stop_hook_starts_async_extraction_when_enabled(self):
         fake_bin = self.tmp_path / "fake-bin"
         fake_bin.mkdir()
         log_path = self.tmp_path / "codex-memory.log"
@@ -232,7 +263,30 @@ class CodexMemoryCliTests(unittest.TestCase):
         )
 
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("extract run --limit 7", log_path.read_text())
+        self.assertIn("extract start --limit 7", log_path.read_text())
+
+    def test_extract_jobs_summarizes_latest_job_statuses(self):
+        jobs = self.tmp_path / "memory" / "system" / "extract-jobs.jsonl"
+        jobs.parent.mkdir(parents=True, exist_ok=True)
+        rows = [
+            {"job_id": "job-1", "status": "started", "pid": 101, "started_at": "2026-06-20T10:00:00+00:00"},
+            {"job_id": "job-1", "status": "running", "running_at": "2026-06-20T10:00:01+00:00"},
+            {"job_id": "job-1", "status": "succeeded", "finished_at": "2026-06-20T10:00:02+00:00", "returncode": 0},
+            {"job_id": "job-2", "status": "started", "pid": 102, "started_at": "2026-06-20T10:01:00+00:00"},
+            {"job_id": "job-3", "status": "started", "pid": 103, "started_at": "2026-06-20T10:02:00+00:00"},
+            {"job_id": "job-3", "status": "failed", "finished_at": "2026-06-20T10:02:02+00:00", "returncode": 1},
+        ]
+        jobs.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
+
+        result = run_cli(self.tmp_path, "extract", "jobs", "--json")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["counts"], {"failed": 1, "started": 1, "succeeded": 1})
+        by_id = {job["job_id"]: job for job in payload["jobs"]}
+        self.assertEqual(by_id["job-1"]["status"], "succeeded")
+        self.assertEqual(by_id["job-2"]["status"], "started")
+        self.assertEqual(by_id["job-3"]["status"], "failed")
 
     def test_hooks_do_not_write_flow_log_when_debug_is_disabled(self):
         memory_root = self.tmp_path / "memory"
@@ -304,7 +358,7 @@ class CodexMemoryCliTests(unittest.TestCase):
         self.assertEqual(rows[0]["action_returncode"], 0)
         self.assertTrue(rows[0]["entry_id"].startswith("up_"))
         self.assertEqual(rows[1]["status"], "skipped")
-        self.assertEqual(rows[1]["action"], "extract_run")
+        self.assertEqual(rows[1]["action"], "extract_start")
         self.assertFalse(rows[1]["extract_on_stop"])
 
     def test_bin_launcher_invokes_cli_without_installing(self):
@@ -428,8 +482,10 @@ class CodexMemoryCliTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         target = self.tmp_path / "memory" / "canonical" / "user" / "preferences.md"
         text = target.read_text()
+        self.assertIn("# 偏好", text)
         self.assertIn("- 用户偏好架构讨论先给整体流程。", text)
-        self.assertIn("Source: up_20260620_1", text)
+        self.assertNotIn("来源:", text)
+        self.assertNotIn("原因:", text)
 
         processed = read_jsonl(self.tmp_path / "memory" / "system" / "processed.jsonl")
         self.assertEqual(
@@ -443,6 +499,47 @@ class CodexMemoryCliTests(unittest.TestCase):
         checkpoint = json.loads((self.tmp_path / "memory" / "system" / "checkpoint.json").read_text())
         self.assertEqual(checkpoint["last_processed_id"], "up_20260620_2")
         self.assertEqual(checkpoint["processed_count"], 2)
+
+    def test_apply_plan_deduplicates_and_updates_similar_bullets(self):
+        target = self.tmp_path / "memory" / "canonical" / "user" / "preferences.md"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("# 偏好\n\n- 用户偏好短回答。\n", encoding="utf-8")
+        duplicate = {
+            "candidates": [
+                {
+                    "kind": "user_preference",
+                    "target_file": "canonical/user/preferences.md",
+                    "operation": "append_bullet",
+                    "content": "用户偏好短回答",
+                    "source_ids": ["up_dup"],
+                    "confidence": "high",
+                    "reason": "duplicate",
+                }
+            ],
+            "ignored": [],
+        }
+        update = {
+            "candidates": [
+                {
+                    "kind": "user_preference",
+                    "target_file": "canonical/user/preferences.md",
+                    "operation": "append_bullet",
+                    "content": "用户偏好短回答，并希望回答直接给结论。",
+                    "source_ids": ["up_update"],
+                    "confidence": "high",
+                    "reason": "new detail",
+                }
+            ],
+            "ignored": [],
+        }
+
+        first = run_cli(self.tmp_path, "plan", "apply", "--stdin", input_text=json.dumps(duplicate))
+        second = run_cli(self.tmp_path, "plan", "apply", "--stdin", input_text=json.dumps(update))
+
+        self.assertEqual(first.returncode, 0, first.stderr)
+        self.assertEqual(second.returncode, 0, second.stderr)
+        lines = [line for line in target.read_text(encoding="utf-8").splitlines() if line.startswith("- ")]
+        self.assertEqual(lines, ["- 用户偏好短回答，并希望回答直接给结论。"])
 
     def test_apply_plan_writes_extraction_log_per_source_id(self):
         plan = {

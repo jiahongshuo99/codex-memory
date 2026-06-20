@@ -34,10 +34,10 @@ The full memory directory contract lives in [assets/memory-structure.md](assets/
 2. CLI appends the user prompt to JSONL inbox with a stable ID and metadata.
 3. Hook injects a short memory protocol on every user prompt.
 4. Codex decides whether to inspect relevant canonical memory.
-5. A manual or scheduled extraction command processes pending inbox entries.
+5. A manual, scheduled, or Stop-hook-started background extraction command processes pending inbox entries.
 6. The CLI calls Codex CLI for semantic extraction, validates the returned plan, applies safe markdown bullets, and updates `processed.jsonl` plus `checkpoint.json`.
 
-Optional synchronous extraction can also run from the Codex `Stop` hook. It is disabled by default and must be enabled with an environment variable.
+Optional extraction can also be started from the Codex `Stop` hook. It is disabled by default and must be enabled with an environment variable. When enabled, the hook starts a background extraction job and returns immediately.
 
 ## CLI
 
@@ -99,11 +99,25 @@ Apply an extraction plan:
 codex-memory plan apply --stdin < plan.json
 ```
 
-Run extraction through Codex CLI:
+Run extraction through Codex CLI synchronously:
 
 ```bash
 codex-memory extract run --limit 20
 ```
+
+Start extraction asynchronously and return immediately:
+
+```bash
+codex-memory extract start --limit 20
+```
+
+View the extraction job board:
+
+```bash
+codex-memory extract jobs --json
+```
+
+Job state is recorded in `system/extract-jobs.jsonl`. Background job stdout/stderr logs are stored under `system/extract-jobs/`.
 
 The extraction command shells out to:
 
@@ -148,7 +162,7 @@ CODEX_AGENT_MEMORY_ROOT=/path/to/memory codex-memory inbox pending --json
 The plugin includes:
 
 - `UserPromptSubmit`: always records the user prompt into inbox and injects the short memory protocol.
-- `Stop`: optionally runs synchronous extraction at the end of each turn.
+- `Stop`: optionally starts asynchronous extraction at the end of each turn.
 
 `UserPromptSubmit` calls:
 
@@ -168,7 +182,7 @@ The hook scripts can call the plugin-local CLI source directly, so hooks do not 
 
 Default: disabled.
 
-Enable synchronous extraction at turn end:
+Enable asynchronous extraction at turn end:
 
 ```bash
 export CODEX_AGENT_MEMORY_EXTRACT_ON_STOP=1
@@ -182,7 +196,7 @@ export CODEX_AGENT_MEMORY_CLI=/path/to/codex-memory
 export CODEX_AGENT_MEMORY_CODEX_COMMAND=/path/to/codex
 ```
 
-The Stop hook waits for extraction to finish, but the CLI only holds the extraction claim lock while choosing and marking a batch. The slower Codex CLI extraction runs outside that lock.
+The Stop hook starts extraction in the background and returns immediately. The background job keeps running until extraction finishes. The CLI only holds the extraction claim lock while choosing and marking a batch; the slower Codex CLI extraction runs outside that lock.
 
 ## Concurrency
 
