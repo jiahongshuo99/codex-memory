@@ -59,6 +59,15 @@ def git(tmp_path, *args):
     )
 
 
+def git_at(path, *args):
+    return subprocess.run(
+        ["git", "-C", str(path), *args],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+
 class CodexMemoryCliTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -111,6 +120,9 @@ class CodexMemoryCliTests(unittest.TestCase):
         self.assertEqual(entries[0]["text"], "记住我喜欢短回答")
         agents_text = (project / "AGENTS.md").read_text(encoding="utf-8")
         self.assertIn("codex-agent-memory workspace-key: example-repo", agents_text)
+        self.assertIn(".codex/codex-agent-memory", agents_text)
+        self.assertIn("git@github.com:jiahongshuo99/codex-memory.git", agents_text)
+        self.assertIn("优先检索该目录中的项目级记忆", agents_text)
         self.assertTrue((self.tmp_path / "memory" / ".git").exists())
         gitignore = (self.tmp_path / "memory" / ".gitignore").read_text(encoding="utf-8")
         self.assertIn("*", gitignore)
@@ -143,6 +155,30 @@ class CodexMemoryCliTests(unittest.TestCase):
         entries = read_jsonl(next((self.tmp_path / "memory" / "inbox" / "events").glob("*.jsonl")))
         self.assertEqual(entries[0]["workspace_key"], "readable-project")
         self.assertEqual(agents.read_text(encoding="utf-8").count("codex-agent-memory workspace-key"), 1)
+        self.assertIn(".codex/codex-agent-memory", agents.read_text(encoding="utf-8"))
+
+    def test_workspace_key_uses_git_root_for_monorepo(self):
+        project = self.tmp_path / "monorepo"
+        nested = project / "packages" / "app"
+        nested.mkdir(parents=True)
+        self.assertEqual(git_at(project, "init").returncode, 0)
+
+        result = run_cli(
+            self.tmp_path,
+            "inbox",
+            "append",
+            "--type",
+            "user_prompt",
+            "--cwd",
+            str(nested),
+            input_text="项目测试命令是 npm test",
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        entries = read_jsonl(next((self.tmp_path / "memory" / "inbox" / "events").glob("*.jsonl")))
+        self.assertEqual(entries[0]["workspace_key"], "monorepo")
+        self.assertTrue((project / "AGENTS.md").exists())
+        self.assertFalse((nested / "AGENTS.md").exists())
 
     def test_inbox_append_accepts_explicit_codex_session_id(self):
         result = run_cli(
@@ -335,13 +371,26 @@ class CodexMemoryCliTests(unittest.TestCase):
         self.assertEqual(json.loads(result.stdout), [])
 
     def test_extract_dry_run_includes_memory_structure_contract(self):
-        run_cli(self.tmp_path, "inbox", "append", "--type", "user_prompt", input_text="remember a domain rule")
+        project = self.tmp_path / "example-repo"
+        project.mkdir()
+        run_cli(
+            self.tmp_path,
+            "inbox",
+            "append",
+            "--type",
+            "user_prompt",
+            "--cwd",
+            str(project),
+            input_text="remember a domain rule",
+        )
 
         result = run_cli(self.tmp_path, "extract", "run", "--dry-run", "--limit", "1")
 
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("Codex Agent Memory Structure", result.stdout)
         self.assertIn("canonical/domains/<domain-key>/", result.stdout)
+        self.assertIn(".codex/codex-agent-memory/canonical/", result.stdout)
+        self.assertNotIn("canonical/workspaces/<workspace-key>/", result.stdout)
         self.assertIn("assets/extraction-output.schema.json", result.stdout)
         self.assertIn("先提炼背后的长期原则", result.stdout)
         self.assertIn("优先选择更通用且不失真的最宽作用域", result.stdout)
@@ -368,6 +417,45 @@ class CodexMemoryCliTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         target = self.tmp_path / "memory" / "canonical" / "domains" / "agent-memory" / "decisions.md"
         self.assertIn("Canonical memory is split", target.read_text())
+
+    def test_workspace_candidate_writes_to_project_memory_and_stages_without_commit(self):
+        project = self.tmp_path / "project-repo"
+        project.mkdir()
+        self.assertEqual(git_at(project, "init").returncode, 0)
+        entry_id = json.loads(
+            run_cli(
+                self.tmp_path,
+                "inbox",
+                "append",
+                "--type",
+                "user_prompt",
+                "--cwd",
+                str(project),
+                input_text="这个项目用 npm test 跑测试。",
+            ).stdout
+        )["id"]
+        plan = {
+            "candidates": [
+                {
+                    "kind": "workspace_workflow",
+                    "target_file": "canonical/workflows.md",
+                    "content": "项目使用 npm test 运行测试。",
+                    "source_ids": [entry_id],
+                }
+            ],
+            "ignored": [],
+        }
+
+        result = run_cli(self.tmp_path, "plan", "apply", "--stdin", input_text=json.dumps(plan))
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        target = project / ".codex" / "codex-agent-memory" / "canonical" / "workflows.md"
+        self.assertIn("- 项目使用 npm test 运行测试。", target.read_text(encoding="utf-8"))
+        self.assertFalse((self.tmp_path / "memory" / "canonical" / "workspaces").exists())
+        status = git_at(project, "status", "--short").stdout
+        self.assertIn("A  .codex/codex-agent-memory/canonical/workflows.md", status)
+        self.assertNotIn("?? .codex/codex-agent-memory/canonical/workflows.md", status)
+        self.assertNotEqual(git_at(project, "log", "--oneline", "-1").returncode, 0)
 
     def test_stop_hook_is_disabled_by_default(self):
         env = {
@@ -1072,20 +1160,34 @@ class CodexMemoryCliTests(unittest.TestCase):
         self.assertEqual(lines, ["- 用户偏好短回答，并希望回答直接给结论。"])
 
     def test_apply_plan_general_memory_removes_similar_workspace_bullet(self):
-        workspace = self.tmp_path / "memory" / "canonical" / "workspaces" / "jian" / "standards.md"
+        project = self.tmp_path / "jian"
+        project.mkdir()
+        workspace = project / ".codex" / "codex-agent-memory" / "canonical" / "standards.md"
         workspace.parent.mkdir(parents=True, exist_ok=True)
         workspace.write_text(
             "# 标准\n\n"
             "- 在 `jian` workspace 中，结构化输出 schema 应保持单一来源，避免后续迭代出现不一致。\n",
             encoding="utf-8",
         )
+        entry_id = json.loads(
+            run_cli(
+                self.tmp_path,
+                "inbox",
+                "append",
+                "--type",
+                "user_prompt",
+                "--cwd",
+                str(project),
+                input_text="schema 要保持单一来源。",
+            ).stdout
+        )["id"]
         plan = {
             "candidates": [
                 {
                     "kind": "engineering_standard",
                     "target_file": "canonical/engineering/standards.md",
                     "content": "结构化输出 schema 应保持单一来源，避免后续迭代出现不一致。",
-                    "source_ids": ["up_general"],
+                    "source_ids": [entry_id],
                 }
             ],
             "ignored": [],
@@ -1099,6 +1201,20 @@ class CodexMemoryCliTests(unittest.TestCase):
         self.assertNotIn("结构化输出 schema", workspace.read_text(encoding="utf-8"))
 
     def test_apply_plan_workspace_memory_does_not_remove_general_bullet(self):
+        project = self.tmp_path / "jian"
+        project.mkdir()
+        entry_id = json.loads(
+            run_cli(
+                self.tmp_path,
+                "inbox",
+                "append",
+                "--type",
+                "user_prompt",
+                "--cwd",
+                str(project),
+                input_text="这个项目的 schema 要保持单一来源。",
+            ).stdout
+        )["id"]
         engineering = self.tmp_path / "memory" / "canonical" / "engineering" / "standards.md"
         engineering.parent.mkdir(parents=True, exist_ok=True)
         engineering.write_text("# 标准\n\n- 结构化输出 schema 应保持单一来源。\n", encoding="utf-8")
@@ -1106,9 +1222,9 @@ class CodexMemoryCliTests(unittest.TestCase):
             "candidates": [
                 {
                     "kind": "workspace_standard",
-                    "target_file": "canonical/workspaces/jian/standards.md",
-                    "content": "在 `jian` workspace 中，结构化输出 schema 应保持单一来源。",
-                    "source_ids": ["up_workspace"],
+                    "target_file": "canonical/standards.md",
+                    "content": "项目内结构化输出 schema 应保持单一来源。",
+                    "source_ids": [entry_id],
                 }
             ],
             "ignored": [],
@@ -1118,8 +1234,8 @@ class CodexMemoryCliTests(unittest.TestCase):
 
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("- 结构化输出 schema 应保持单一来源。", engineering.read_text(encoding="utf-8"))
-        workspace = self.tmp_path / "memory" / "canonical" / "workspaces" / "jian" / "standards.md"
-        self.assertIn("- 在 `jian` workspace 中，结构化输出 schema 应保持单一来源。", workspace.read_text(encoding="utf-8"))
+        workspace = project / ".codex" / "codex-agent-memory" / "canonical" / "standards.md"
+        self.assertIn("- 项目内结构化输出 schema 应保持单一来源。", workspace.read_text(encoding="utf-8"))
 
     def test_apply_plan_writes_extraction_log_per_source_id(self):
         plan = {

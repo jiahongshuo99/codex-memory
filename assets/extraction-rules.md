@@ -4,12 +4,12 @@ Extract only durable memory with high future reuse value.
 
 所有写入 `canonical/` 的记忆内容必须使用中文；如果源内容是英文，也要提炼成自然中文。
 
-Before choosing a `target_file`, follow `assets/memory-structure.md`. Canonical memory is split into four modules:
+Before choosing a `target_file`, follow `assets/memory-structure.md`. Canonical memory is split by root and scope:
 
-- `canonical/user/`
-- `canonical/engineering/`
-- `canonical/workspaces/<workspace-key>/`
-- `canonical/domains/<domain-key>/`
+- global `canonical/user/`
+- global `canonical/engineering/`
+- project `.codex/codex-agent-memory/canonical/`
+- global `canonical/domains/<domain-key>/`
 
 ## Generalization Preference
 
@@ -19,7 +19,9 @@ Before writing a candidate, decide whether the underlying idea is transferable b
 - Treat the current project as an example, not as part of the memory, unless the project context is required for correctness.
 - Avoid narrow wording such as "在 <workspace> 中", "针对这个项目", or "这个情况" unless the memory would be wrong without that scope.
 - For schema definitions, protocol contracts, configuration contracts, output formats, API contracts, and similar consistency concerns, prefer `canonical/engineering/standards.md`.
-- Do not write the same idea to both workspace and engineering memory by default. Choose the broadest accurate scope.
+- Do not write the same idea to both project and engineering memory by default. Choose the broadest accurate scope.
+- For `workspace_*` candidate kinds, write `target_file` under the project memory root using paths such as `canonical/workflows.md`, `canonical/standards.md`, `canonical/stack.md`, or `canonical/gotchas.md`.
+- Never output a project path that includes a workspace key segment.
 
 ## Assistant Message Memory
 
@@ -61,7 +63,6 @@ Keep:
 
 - Reusable engineering judgment standards.
 - Cross-project engineering workflows and standards.
-- Project or workspace workflows that are expected to apply repeatedly within that workspace.
 - Testing, review, release, and style standards.
 - Gotchas that are general enough to prevent future repeated mistakes.
 
@@ -71,6 +72,16 @@ Do not keep:
 - Narrow business facts.
 - Specific implementation details from a temporary case.
 - Current code state unless it is a stable project convention.
+
+## Project Memory
+
+Keep in project memory only when the fact depends on the concrete repo:
+
+- Local commands, scripts, test workflows, release procedures, or repo-specific automation.
+- Project architecture, stack, directory layout, or conventions that would be misleading elsewhere.
+- Project-specific caveats, known failure modes, and acceptance criteria.
+
+Project memory is routed through `workspace_*` candidate kinds. The extractor uses the source entry `cwd` to resolve the repo root, then writes under `<repo-root>/.codex/codex-agent-memory/`.
 
 ## Domain Memory
 

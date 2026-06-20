@@ -7,11 +7,11 @@ description: Use before code search or external lookup when a task involves an e
 
 This skill uses a local, text-first memory store managed by the `codex-memory` CLI.
 
-The full memory directory contract is in `assets/memory-structure.md` in this plugin. Use that contract when deciding whether a memory belongs under `canonical/user`, `canonical/engineering`, `canonical/workspaces/<workspace-key>`, or `canonical/domains/<domain-key>`.
+The full memory directory contract is in `assets/memory-structure.md` in this plugin. Use that contract when deciding whether a memory belongs under global `canonical/user`, global `canonical/engineering`, project `.codex/codex-agent-memory/canonical`, or global `canonical/domains/<domain-key>`.
 
 ## Memory Root
 
-Default root:
+Default global root:
 
 ```text
 ~/.codex/codex-agent-memory
@@ -22,6 +22,14 @@ Override with:
 ```text
 CODEX_AGENT_MEMORY_ROOT=/path/to/memory
 ```
+
+Project memory root:
+
+```text
+<repo-root>/.codex/codex-agent-memory
+```
+
+For monorepos, read one project memory root at the repo root.
 
 ## Memory-First Rule
 
@@ -42,7 +50,7 @@ Do not start with `rg`, broad file listing, README exploration, web search, or s
 
 1. Identify the workspace key from the prompt, cwd, or project `AGENTS.md` marker.
 2. Read only the likely relevant canonical files, usually 1 to 3 files:
-   - `canonical/workspaces/<workspace-key>/` for project commands, workflows, stack, standards, and known issues.
+   - `<repo-root>/.codex/codex-agent-memory/canonical/` for project commands, workflows, stack, standards, and known issues.
    - `canonical/user/` for user preferences, constraints, and stable profile.
    - `canonical/engineering/` for reusable engineering standards and workflows.
    - `canonical/domains/` for durable domain facts and rules.
@@ -97,6 +105,8 @@ If `CODEX_AGENT_MEMORY_EXTRACT_ON_STOP=1`, the Stop hook also runs synchronous e
 
 Extraction uses a short claim lock under `system/locks/extract-claim.lock`. The lock is held only while marking a batch as `processing`; Codex CLI extraction runs outside the lock. Entries marked `processing`, `processed`, or `ignored` are not returned by pending queries.
 
+Project-specific extraction writes to `<repo-root>/.codex/codex-agent-memory/canonical/` and stages changed project memory files with `git add`. It does not commit project repository changes.
+
 ## What Belongs In Canonical Memory
 
 Keep:
@@ -105,7 +115,7 @@ Keep:
 - Explicit user boundaries and permission preferences.
 - Stable user background that is clearly useful.
 - Reusable cross-project engineering principles, workflows, standards, stack decisions, and gotchas.
-- Workspace-specific facts and workflows under the matching workspace key.
+- Project-specific facts and workflows under the project memory root.
 - Durable domain concepts, rules, decisions, and gotchas under the matching domain key.
 
 Do not keep:

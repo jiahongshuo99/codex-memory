@@ -29,6 +29,14 @@ INTERNAL_EXTRACT_ENV = "CODEX_AGENT_MEMORY_INTERNAL_EXTRACT"
 LOG_SNIPPET_CHARS = 1200
 WORKSPACE_KEY_PATTERN = re.compile(r"codex-agent-memory workspace-key:\s*([a-z0-9-]+)")
 WORKSPACE_MARKER_TEMPLATE = "<!-- codex-agent-memory workspace-key: {key} -->"
+PROJECT_MEMORY_REL = Path(".codex") / "codex-agent-memory"
+PLUGIN_REPO_URL = "git@github.com:jiahongshuo99/codex-memory.git"
+PROJECT_MEMORY_GUIDANCE_TEXT = "本项目使用 codex-agent-memory 维护项目级记忆。项目级记忆位于 `.codex/codex-agent-memory/`；处理本项目问题时，应优先检索该目录中的项目级记忆，再查全局记忆或源码。若本机未安装插件，可从 `git@github.com:jiahongshuo99/codex-memory.git` 获取。"
+PROJECT_MEMORY_GUIDANCE_TEMPLATE = """\
+{marker}
+
+{guidance}
+"""
 PROTOCOL_TEMPLATE = (
     "Memory root: {root}\n"
     "Memory-first rule: for existing workspaces, repeated workflows, prior decisions, user preferences, "
@@ -64,7 +72,6 @@ def ensure_base(root: Path) -> None:
     for rel in [
         "inbox/events",
         "canonical/user",
-        "canonical/workspaces",
         "system/locks",
         "tmp",
     ]:
@@ -82,27 +89,79 @@ def slugify_key(value: str) -> str:
     return slug or "workspace"
 
 
-def workspace_key(cwd: Optional[str]) -> Optional[str]:
+def find_git_root(path: Path) -> Optional[Path]:
+    current = path if path.is_dir() else path.parent
+    for candidate in [current, *current.parents]:
+        if (candidate / ".git").exists():
+            return candidate
+    return None
+
+
+def project_root(cwd: Optional[str]) -> Optional[Path]:
     if not cwd:
         return None
     path = Path(cwd).expanduser().resolve()
-    name = path.name or "workspace"
-    key = slugify_key(name)
-    if not path.exists() or not path.is_dir():
-        return key
+    if not path.exists():
+        return path if path.suffix == "" else path.parent
+    git_root = find_git_root(path)
+    if git_root:
+        return git_root
+    current = path if path.is_dir() else path.parent
+    for candidate in [current, *current.parents]:
+        agents = candidate / "AGENTS.md"
+        if agents.exists() and WORKSPACE_KEY_PATTERN.search(agents.read_text(encoding="utf-8")):
+            return candidate
+    return current
 
-    agents_path = path / "AGENTS.md"
-    if agents_path.exists():
-        text = agents_path.read_text(encoding="utf-8")
-        match = WORKSPACE_KEY_PATTERN.search(text)
-        if match:
-            return match.group(1)
+
+def project_memory_root_for_cwd(cwd: Optional[str]) -> Optional[Path]:
+    root = project_root(cwd)
+    return root / PROJECT_MEMORY_REL if root else None
+
+
+def project_guidance(key: str) -> str:
+    return PROJECT_MEMORY_GUIDANCE_TEMPLATE.format(
+        marker=WORKSPACE_MARKER_TEMPLATE.format(key=key),
+        guidance=PROJECT_MEMORY_GUIDANCE_TEXT,
+    ).rstrip() + "\n"
+
+
+def ensure_project_agents(root: Path, key: str) -> str:
+    agents_path = root / "AGENTS.md"
+    marker = WORKSPACE_MARKER_TEMPLATE.format(key=key)
+    guidance = project_guidance(key)
+    if not agents_path.exists():
+        agents_path.write_text(guidance, encoding="utf-8")
+        return key
+    text = agents_path.read_text(encoding="utf-8")
+    match = WORKSPACE_KEY_PATTERN.search(text)
+    if match:
+        key = match.group(1)
+        marker = WORKSPACE_MARKER_TEMPLATE.format(key=key)
+        guidance = project_guidance(key)
+    if ".codex/codex-agent-memory" in text and PLUGIN_REPO_URL in text:
+        return key
+    if not match and marker not in text:
         if text and not text.endswith("\n"):
             text += "\n"
-        agents_path.write_text(text + "\n" + WORKSPACE_MARKER_TEMPLATE.format(key=key) + "\n", encoding="utf-8")
-    else:
-        agents_path.write_text(WORKSPACE_MARKER_TEMPLATE.format(key=key) + "\n", encoding="utf-8")
+        text += "\n" + marker + "\n"
+    if ".codex/codex-agent-memory" not in text or PLUGIN_REPO_URL not in text:
+        if text and not text.endswith("\n"):
+            text += "\n"
+        text += "\n" + (PROJECT_MEMORY_GUIDANCE_TEXT + "\n" if match else guidance)
+    agents_path.write_text(text, encoding="utf-8")
     return key
+
+
+def workspace_key(cwd: Optional[str]) -> Optional[str]:
+    root = project_root(cwd)
+    if not root:
+        return None
+    name = root.name or "workspace"
+    key = slugify_key(name)
+    if not root.exists() or not root.is_dir():
+        return key
+    return ensure_project_agents(root, key)
 
 
 def make_id(event_type: str, text: str, timestamp: str, session_id: Optional[str], turn_id: Optional[str]) -> str:
@@ -333,11 +392,17 @@ def inbox_event_files(root: Path) -> List[Path]:
     return sorted(events_root.glob("*.jsonl"))
 
 
-def pending_entries(root: Path) -> List[Dict[str, Any]]:
-    done = processed_ids(root)
+def all_inbox_entries(root: Path) -> List[Dict[str, Any]]:
     entries: List[Dict[str, Any]] = []
     for path in inbox_event_files(root):
         entries.extend(read_jsonl(path))
+    entries.sort(key=lambda row: row.get("ts") or "")
+    return entries
+
+
+def pending_entries(root: Path) -> List[Dict[str, Any]]:
+    done = processed_ids(root)
+    entries = all_inbox_entries(root)
     entries = [row for row in entries if row.get("id") not in done]
     entries.sort(key=lambda row: row.get("ts") or "")
     return entries
@@ -674,7 +739,37 @@ def canonical_path(root: Path, target_file: str) -> Path:
     return path
 
 
-def validate_candidate(candidate: Dict[str, Any], root: Path) -> Path:
+def is_workspace_kind(kind: Optional[str]) -> bool:
+    return bool(kind and kind.startswith("workspace_"))
+
+
+def source_entry_map(root: Path) -> Dict[str, Dict[str, Any]]:
+    return {entry["id"]: entry for entry in all_inbox_entries(root) if entry.get("id")}
+
+
+def project_root_for_candidate(candidate: Dict[str, Any], sources_by_id: Dict[str, Dict[str, Any]]) -> Path:
+    for source_id in candidate.get("source_ids") or []:
+        entry = sources_by_id.get(source_id)
+        if not entry:
+            continue
+        root = project_root(entry.get("cwd"))
+        if root:
+            if root.exists():
+                workspace_key(str(root))
+            return root
+    raise CliError("workspace candidate requires a source entry with cwd")
+
+
+def candidate_path(candidate: Dict[str, Any], root: Path, sources_by_id: Dict[str, Dict[str, Any]]) -> Path:
+    target_file = candidate.get("target_file", "")
+    if is_workspace_kind(candidate.get("kind")):
+        project = project_root_for_candidate(candidate, sources_by_id)
+        memory_root = project / PROJECT_MEMORY_REL
+        return canonical_path(memory_root, target_file)
+    return canonical_path(root, target_file)
+
+
+def validate_candidate(candidate: Dict[str, Any], root: Path, sources_by_id: Optional[Dict[str, Dict[str, Any]]] = None) -> Path:
     kind = candidate.get("kind")
     if kind not in allowed_kinds():
         raise CliError(f"unsupported candidate kind: {kind}")
@@ -686,7 +781,7 @@ def validate_candidate(candidate: Dict[str, Any], root: Path) -> Path:
     sources = candidate.get("source_ids") or []
     if not isinstance(sources, list) or not sources:
         raise CliError("candidate source_ids must be a non-empty list")
-    return canonical_path(root, candidate.get("target_file", ""))
+    return candidate_path(candidate, root, sources_by_id or {})
 
 
 def memory_title(path: Path) -> str:
@@ -736,11 +831,6 @@ def is_similar_memory(existing: str, candidate: str) -> bool:
     return difflib.SequenceMatcher(None, existing_norm, candidate_norm).ratio() >= 0.86
 
 
-def is_workspace_canonical_path(path: Path) -> bool:
-    parts = path.parts
-    return any(part == "canonical" and index + 1 < len(parts) and parts[index + 1] == "workspaces" for index, part in enumerate(parts))
-
-
 def remove_bullet_at(lines: List[str], index: int) -> List[str]:
     start = index
     end = index + 1
@@ -751,29 +841,45 @@ def remove_bullet_at(lines: List[str], index: int) -> List[str]:
     return lines[:start] + lines[end:]
 
 
-def remove_similar_workspace_bullets(root: Path, target_path: Path, content: str) -> bool:
-    if is_workspace_canonical_path(target_path):
-        return False
-    workspaces_root = root / "canonical" / "workspaces"
-    if not workspaces_root.exists():
+def project_memory_roots_for_sources(sources_by_id: Dict[str, Dict[str, Any]]) -> List[Path]:
+    roots: List[Path] = []
+    seen: set[Path] = set()
+    for entry in sources_by_id.values():
+        memory = project_memory_root_for_cwd(entry.get("cwd"))
+        if not memory:
+            continue
+        resolved = memory.resolve()
+        if resolved in seen:
+            continue
+        roots.append(memory)
+        seen.add(resolved)
+    return roots
+
+
+def remove_similar_project_bullets(root: Path, target_path: Path, content: str, sources_by_id: Dict[str, Dict[str, Any]]) -> bool:
+    if is_under_project_memory(target_path):
         return False
     changed = False
-    for path in sorted(workspaces_root.rglob("*.md")):
-        if path.resolve() == target_path.resolve():
+    for memory_root in project_memory_roots_for_sources(sources_by_id):
+        canonical = memory_root / "canonical"
+        if not canonical.exists():
             continue
-        lines = path.read_text(encoding="utf-8").splitlines()
-        index = 0
-        path_changed = False
-        while index < len(lines):
-            line = lines[index]
-            if line.startswith("- ") and is_similar_memory(line[2:].strip(), content):
-                lines = remove_bullet_at(lines, index)
-                path_changed = True
-                changed = True
+        for path in sorted(canonical.rglob("*.md")):
+            if path.resolve() == target_path.resolve():
                 continue
-            index += 1
-        if path_changed:
-            path.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
+            lines = path.read_text(encoding="utf-8").splitlines()
+            index = 0
+            path_changed = False
+            while index < len(lines):
+                line = lines[index]
+                if line.startswith("- ") and is_similar_memory(line[2:].strip(), content):
+                    lines = remove_bullet_at(lines, index)
+                    path_changed = True
+                    changed = True
+                    continue
+                index += 1
+            if path_changed:
+                path.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
     return changed
 
 
@@ -863,6 +969,28 @@ def write_extraction_log(root: Path, plan: Dict[str, Any]) -> None:
         append_jsonl(root / "system" / "extraction-log.jsonl", summary)
 
 
+def is_under_project_memory(path: Path) -> bool:
+    parts = path.resolve().parts
+    rel_parts = PROJECT_MEMORY_REL.parts
+    return any(tuple(parts[index : index + len(rel_parts)]) == rel_parts for index in range(len(parts) - len(rel_parts) + 1))
+
+
+def git_add_if_tracked_project(path: Path) -> None:
+    git_root = find_git_root(path)
+    if not git_root:
+        return
+    rel = path.resolve().relative_to(git_root.resolve())
+    add = run_git(git_root, "add", "--", str(rel))
+    if add.returncode != 0:
+        raise CliError(add.stderr.strip() or f"failed to stage project memory path: {path}")
+
+
+def git_add_project_memory_roots(sources_by_id: Dict[str, Dict[str, Any]]) -> None:
+    for memory_root in project_memory_roots_for_sources(sources_by_id):
+        if memory_root.exists():
+            git_add_if_tracked_project(memory_root)
+
+
 def command_plan_apply(args: argparse.Namespace) -> int:
     root = memory_root()
     ensure_base(root)
@@ -871,10 +999,17 @@ def command_plan_apply(args: argparse.Namespace) -> int:
     applied = []
     ignored = []
     processed_source_ids: List[str] = []
+    sources_by_id = source_entry_map(root)
     for candidate in plan.get("candidates", []):
-        path = validate_candidate(candidate, root)
-        removed_narrower = remove_similar_workspace_bullets(root, path, candidate["content"].strip())
+        path = validate_candidate(candidate, root, sources_by_id)
+        removed_narrower = remove_similar_project_bullets(root, path, candidate["content"].strip(), sources_by_id)
         changed = upsert_bullet(path, candidate["content"].strip())
+        if changed or removed_narrower:
+            for changed_path in [path]:
+                if is_under_project_memory(changed_path):
+                    git_add_if_tracked_project(changed_path)
+            if removed_narrower:
+                git_add_project_memory_roots(sources_by_id)
         for source_id in candidate["source_ids"]:
             processed_source_ids.append(source_id)
             append_jsonl(
@@ -924,9 +1059,14 @@ def extraction_prompt(entries: List[Dict[str, Any]], root: Path) -> str:
         "生成候选前必须先检查下面的现有 canonical 记忆；如果已有相同或相近内容，不要重复输出候选。"
         "只有确实有新增信息时，才输出可合并后的新候选内容。\n"
         "Return only JSON that conforms to assets/extraction-output.schema.json.\n"
-        "Each candidate must use a target_file under canonical/.\n\n"
-        "Existing canonical memory:\n"
+        "Each candidate must use a target_file under canonical/.\n"
+        "user/engineering/domain candidates write to the global memory root. "
+        "workspace_* candidates write to the source project memory root `.codex/codex-agent-memory/`, so use paths such as "
+        "`canonical/workflows.md` or `canonical/standards.md`; do not include a workspace key segment in project target paths.\n\n"
+        "Existing global canonical memory:\n"
         f"{canonical_snapshot(root)}\n\n"
+        "Existing project canonical memory:\n"
+        f"{project_canonical_snapshot(entries)}\n\n"
         "Inbox entries:\n"
         f"{json.dumps(entries, ensure_ascii=False, indent=2)}\n"
     )
@@ -949,6 +1089,44 @@ def canonical_snapshot(root: Path, *, limit: int = 20000) -> str:
             break
         parts.append(chunk)
         total += len(chunk)
+    return "\n".join(parts) if parts else "(empty)"
+
+
+def project_canonical_snapshot(entries: List[Dict[str, Any]], *, limit: int = 20000) -> str:
+    roots: List[Path] = []
+    seen: set[Path] = set()
+    for entry in entries:
+        memory = project_memory_root_for_cwd(entry.get("cwd"))
+        if not memory:
+            continue
+        resolved = memory.resolve()
+        if resolved in seen:
+            continue
+        roots.append(memory)
+        seen.add(resolved)
+    if not roots:
+        return "(empty)"
+    parts: List[str] = []
+    total = 0
+    for memory in roots:
+        canonical = memory / "canonical"
+        project = memory.parent.parent
+        if not canonical.exists():
+            chunk = f"## {project}\n(empty)\n"
+            parts.append(chunk)
+            total += len(chunk)
+            continue
+        for path in sorted(canonical.rglob("*.md")):
+            rel = path.relative_to(memory)
+            text = path.read_text(encoding="utf-8").strip()
+            if not text:
+                continue
+            chunk = f"## {project} :: {rel}\n{text}\n"
+            if total + len(chunk) > limit:
+                parts.append("(truncated)")
+                return "\n".join(parts)
+            parts.append(chunk)
+            total += len(chunk)
     return "\n".join(parts) if parts else "(empty)"
 
 

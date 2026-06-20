@@ -2,9 +2,9 @@
 
 This document is the memory directory contract for the Codex Agent Memory plugin. Extraction agents should use it when deciding where a candidate memory belongs.
 
-## Root
+## Roots
 
-Default root:
+Global memory root:
 
 ```text
 ~/.codex/codex-agent-memory
@@ -16,7 +16,15 @@ Override with:
 CODEX_AGENT_MEMORY_ROOT=/path/to/memory
 ```
 
-## Directory Layout
+Project memory root:
+
+```text
+<repo-root>/.codex/codex-agent-memory
+```
+
+For monorepos, the repo root owns one project memory root for the whole repository. Do not create package-level memory roots inside subdirectories.
+
+## Global Directory Layout
 
 ```text
 <memory-root>/
@@ -37,15 +45,6 @@ CODEX_AGENT_MEMORY_ROOT=/path/to/memory
       stack-decisions.md
       gotchas.md
 
-    workspaces/
-      <workspace-key>/
-        overview.md
-        principles.md
-        workflows.md
-        standards.md
-        stack.md
-        gotchas.md
-
     domains/
       <domain-key>/
         concepts.md
@@ -63,9 +62,29 @@ CODEX_AGENT_MEMORY_ROOT=/path/to/memory
   tmp/
 ```
 
+## Project Directory Layout
+
+```text
+<repo-root>/
+  AGENTS.md
+  .codex/
+    codex-agent-memory/
+      canonical/
+        overview.md
+        principles.md
+        workflows.md
+        standards.md
+        stack.md
+        gotchas.md
+```
+
+Projects that use this plugin must document the project memory rule in `AGENTS.md`: project-specific memory lives in `.codex/codex-agent-memory/`, agents should read it before rediscovering project facts, and machines without the plugin can use `git@github.com:jiahongshuo99/codex-memory.git`.
+
+Project canonical memory should be tracked by the project repository. The extractor stages changed project memory files with `git add`, but it must not commit project repository changes.
+
 ## Core Areas
 
-### `inbox/`
+### Global `inbox/`
 
 Raw event stream. The plugin records user prompts and assistant final answers in daily JSONL files:
 
@@ -73,16 +92,17 @@ Raw event stream. The plugin records user prompts and assistant final answers in
 inbox/events/YYYY-MM-DD.jsonl
 ```
 
-Each line is a JSON object with an `id`, timestamp, type, optional phase, session metadata, workspace hint, and raw text. Treat inbox as append-only.
+Each line is a JSON object with an `id`, timestamp, type, optional phase, session metadata, workspace hint, cwd, and raw text. Treat inbox as append-only.
 
 Important fields:
 
 - `id`: stable raw content ID used by processing logs.
 - `type`: event type, such as `user_prompt` or `assistant_message`.
 - `session_id`: local session identifier passed by the hook or caller.
-- `codex_session_id`: Codex conversation/session identifier. Use this to connect raw memory entries back to richer Codex session context later.
+- `codex_session_id`: Codex conversation/session identifier.
 - `turn_id`: Codex turn identifier when available.
-- `workspace_key`: workspace slug hint derived from `cwd` or passed explicitly.
+- `cwd`: original working directory for routing project-specific memory.
+- `workspace_key`: readable repo or project slug derived from the repo root or `AGENTS.md`.
 - `text`: raw user prompt text.
 - `phase`: assistant message phase when `type` is `assistant_message`; only `final_answer` is collected.
 
@@ -94,25 +114,21 @@ Durable memory that agents may read during normal work. Keep entries concise, st
 
 Do not store raw conversation transcripts, one-off cases, or raw assistant messages in canonical memory.
 
-### `system/`
+### Global `system/`
 
 Machine state for the memory system: checkpoint, processed log, extraction rules, and locks. This is not semantic memory.
 
 Agents should not use `system/` as ordinary task context unless debugging the memory system itself.
 
 - `processed.jsonl`: idempotency and claim state for inbox entries.
-- `extraction-log.jsonl`: append-only extraction audit log. One record per raw content ID per extraction application, including `source_id`, status, and how many canonical memories were extracted.
+- `extraction-log.jsonl`: append-only extraction audit log.
 - `checkpoint.json`: summary progress marker.
 - `extraction-rules.md`: local override for extraction rules.
 - `locks/`: filesystem locks.
 
-### `tmp/`
-
-Scratch space for temporary files.
-
 ## Canonical Modules
 
-### `canonical/user/`
+### Global `canonical/user/`
 
 Memory about the user as a collaborator.
 
@@ -122,7 +138,7 @@ Memory about the user as a collaborator.
 
 Use this module only for memory about the user, not for project facts or general engineering lessons.
 
-### `canonical/engineering/`
+### Global `canonical/engineering/`
 
 Cross-project engineering memory.
 
@@ -130,33 +146,42 @@ Cross-project engineering memory.
 - `workflows.md`: reusable development, debugging, review, release, and operational workflows.
 - `standards.md`: cross-project testing, documentation, quality, and PR standards.
 - `stack-decisions.md`: general technology selection preferences and stack decision criteria.
-- `gotchas.md`: reusable engineering pitfalls that are not specific to one workspace.
+- `gotchas.md`: reusable engineering pitfalls that are not specific to one project.
 
 Use this module when the memory can apply across multiple projects or future engineering tasks.
 
-### `canonical/workspaces/<workspace-key>/`
+### Project `.codex/codex-agent-memory/canonical/`
 
-Memory that is specific to one concrete project, repository, or workspace.
+Memory that is specific to one concrete repository or project.
 
-- `overview.md`: what the workspace is and how it is organized.
-- `principles.md`: workspace-specific architecture or product principles.
-- `workflows.md`: workspace-specific commands, tests, release procedures, and recurring tasks.
-- `standards.md`: workspace-specific style, review, acceptance, and verification standards.
+- `overview.md`: what the project is and how it is organized.
+- `principles.md`: project-specific architecture or product principles.
+- `workflows.md`: project-specific commands, tests, release procedures, and recurring tasks.
+- `standards.md`: project-specific style, review, acceptance, and verification standards.
 - `stack.md`: actual technology stack and important local dependencies.
-- `gotchas.md`: workspace-specific caveats and failure patterns.
+- `gotchas.md`: project-specific caveats and failure patterns.
 
-Use this module only when the memory would be misleading outside that workspace.
+Use this module only when the memory would be misleading outside that project.
 
-### `canonical/domains/<domain-key>/`
+For extraction output, workspace candidate `target_file` values are relative to the project memory root and must still start with `canonical/`, for example:
 
-Long-term subject-matter memory that is neither about the user nor tied to one workspace.
+```text
+canonical/workflows.md
+canonical/standards.md
+```
+
+Do not include the project key in the target path.
+
+### Global `canonical/domains/<domain-key>/`
+
+Long-term subject-matter memory that is neither about the user nor tied to one project.
 
 - `concepts.md`: stable concepts, terms, and mental models.
 - `rules.md`: domain rules, policies, and constraints.
 - `decisions.md`: durable design decisions and rationale.
 - `gotchas.md`: domain-specific caveats and recurring mistakes.
 
-Use this module for topics such as `agent-memory`, `codex-plugins`, or another domain that may span multiple workspaces.
+Use this module for topics such as `agent-memory`, `codex-plugins`, or another domain that may span multiple projects.
 
 ## Key Format
 
@@ -189,19 +214,19 @@ Route candidate memory by scope:
 
 ```text
 How the user wants to be served
-  -> canonical/user/
+  -> global canonical/user/
 
 Cross-project engineering principle, workflow, standard, stack choice, or gotcha
-  -> canonical/engineering/
+  -> global canonical/engineering/
 
-Depends on one concrete repo or workspace, such as local paths, commands, release flow, or stack details
-  -> canonical/workspaces/<workspace-key>/
+Depends on one concrete repo or project, such as local paths, commands, release flow, or stack details
+  -> project .codex/codex-agent-memory/canonical/
 
-Long-term domain knowledge that is not user-specific or workspace-specific
-  -> canonical/domains/<domain-key>/
+Long-term domain knowledge that is not user-specific or project-specific
+  -> global canonical/domains/<domain-key>/
 ```
 
-Before choosing `canonical/workspaces/<workspace-key>/`, test whether the idea remains true outside the current project. If it does, route it to the broadest accurate scope: `canonical/engineering/` for reusable engineering practice, or `canonical/domains/<domain-key>/` for subject-matter knowledge. Use workspace memory only when removing the workspace context would make the memory misleading.
+Before choosing project memory, test whether the idea remains true outside the current project. If it does, route it to the broadest accurate scope: global `canonical/engineering/` for reusable engineering practice, or global `canonical/domains/<domain-key>/` for subject-matter knowledge. Use project memory only when removing the project context would make the memory misleading.
 
 ## Canonical Entry Format
 

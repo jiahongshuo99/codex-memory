@@ -16,7 +16,6 @@ The full memory directory contract lives in [assets/memory-structure.md](assets/
   canonical/
     user/
     engineering/
-    workspaces/<workspace-key>/
     domains/<domain-key>/
 
   system/checkpoint.json
@@ -28,8 +27,18 @@ The full memory directory contract lives in [assets/memory-structure.md](assets/
   tmp/
 ```
 
-The memory root is initialized as a Git repository automatically. Transient files under `tmp/` and
-`system/locks/` are ignored.
+Project-specific memory lives in the project repository:
+
+```text
+<repo-root>/.codex/codex-agent-memory/canonical/
+```
+
+For monorepos, the repo root owns one project memory root for the whole repository. Projects managed
+by this plugin get an `AGENTS.md` note that tells future agents to read project memory from that
+directory and points machines without the plugin at `git@github.com:jiahongshuo99/codex-memory.git`.
+
+The global memory root is initialized as a Git repository automatically. Transient files under `tmp/`
+and `system/locks/` are ignored.
 
 ## Flow
 
@@ -115,7 +124,9 @@ budget, it is marked `failed` with reason `entry_exceeds_max_batch_chars`.
 
 Extraction is serialized with `system/locks/extract-job.lock`. If another extraction job is already
 running, a new run exits with `skipped` and does not claim inbox entries. At the end of each real
-extraction run, the memory root is committed with Git so memory changes can be reviewed over time.
+extraction run, the global memory root is committed with Git so global memory changes can be reviewed
+over time. Project memory changes are staged in the project repository with `git add`; the extractor
+does not commit project repository changes.
 
 Start extraction asynchronously and return immediately:
 
