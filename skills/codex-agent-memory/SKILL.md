@@ -58,6 +58,10 @@ If `codex-memory` is not installed, use the plugin-local launcher:
 
 The UserPromptSubmit hook records user prompts into the JSONL inbox. A separate automation or manual command runs extraction later.
 
+If `CODEX_AGENT_MEMORY_EXTRACT_ON_STOP=1`, the Stop hook also runs synchronous extraction at turn end. This is off by default.
+
+Extraction uses a short claim lock under `system/locks/extract-claim.lock`. The lock is held only while marking a batch as `processing`; Codex CLI extraction runs outside the lock. Entries marked `processing`, `processed`, or `ignored` are not returned by pending queries.
+
 ## What Belongs In Canonical Memory
 
 Keep:

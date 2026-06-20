@@ -11,6 +11,7 @@ PLUGIN_ROOT = Path(__file__).resolve().parents[1]
 CLI = PLUGIN_ROOT / "scripts" / "codex_memory.py"
 BIN = PLUGIN_ROOT / "bin" / "codex-memory"
 INSTALLER = PLUGIN_ROOT / "scripts" / "install_cli.py"
+STOP_HOOK = PLUGIN_ROOT / "scripts" / "stop_hook.py"
 
 
 def run_cli(tmp_path, *args, input_text=None):
@@ -98,6 +99,84 @@ class CodexMemoryCliTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         pending = json.loads(result.stdout)
         self.assertEqual([entry["id"] for entry in pending], [second_id])
+
+    def test_claim_batch_marks_entries_processing_and_prevents_reclaim(self):
+        first = run_cli(self.tmp_path, "inbox", "append", "--source", "user_prompt", input_text="one")
+        second = run_cli(self.tmp_path, "inbox", "append", "--source", "user_prompt", input_text="two")
+        ids = [json.loads(first.stdout)["id"], json.loads(second.stdout)["id"]]
+
+        claim = run_cli(self.tmp_path, "extract", "claim", "--limit", "10")
+        self.assertEqual(claim.returncode, 0, claim.stderr)
+        claimed = json.loads(claim.stdout)
+        self.assertEqual([entry["id"] for entry in claimed["entries"]], ids)
+        self.assertTrue(claimed["batch_id"].startswith("batch_"))
+
+        second_claim = run_cli(self.tmp_path, "extract", "claim", "--limit", "10")
+        self.assertEqual(second_claim.returncode, 0, second_claim.stderr)
+        self.assertEqual(json.loads(second_claim.stdout)["entries"], [])
+
+        processed = read_jsonl(self.tmp_path / "memory" / "system" / "processed.jsonl")
+        self.assertEqual(
+            {entry["id"]: entry["status"] for entry in processed},
+            {ids[0]: "processing", ids[1]: "processing"},
+        )
+
+    def test_pending_ignores_processing_entries(self):
+        appended = run_cli(self.tmp_path, "inbox", "append", "--source", "user_prompt", input_text="one")
+        entry_id = json.loads(appended.stdout)["id"]
+        processed = self.tmp_path / "memory" / "system" / "processed.jsonl"
+        processed.parent.mkdir(parents=True, exist_ok=True)
+        processed.write_text(json.dumps({"id": entry_id, "status": "processing"}) + "\n")
+
+        result = run_cli(self.tmp_path, "inbox", "pending", "--json")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout), [])
+
+    def test_stop_hook_is_disabled_by_default(self):
+        env = {**os.environ, "CODEX_AGENT_MEMORY_ROOT": str(self.tmp_path / "memory")}
+        result = subprocess.run(
+            [sys.executable, str(STOP_HOOK)],
+            input=json.dumps({"hook_event_name": "Stop", "turn_id": "turn-1"}),
+            text=True,
+            capture_output=True,
+            env=env,
+            check=False,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), "")
+
+    def test_stop_hook_runs_sync_extraction_when_enabled(self):
+        fake_bin = self.tmp_path / "fake-bin"
+        fake_bin.mkdir()
+        log_path = self.tmp_path / "codex-memory.log"
+        fake_cli = fake_bin / "codex-memory"
+        fake_cli.write_text(
+            "#!/usr/bin/env sh\n"
+            f"echo \"$@\" >> {log_path}\n"
+            "exit 0\n",
+            encoding="utf-8",
+        )
+        fake_cli.chmod(0o755)
+        env = {
+            **os.environ,
+            "PATH": f"{fake_bin}:{os.environ.get('PATH', '')}",
+            "CODEX_AGENT_MEMORY_EXTRACT_ON_STOP": "1",
+            "CODEX_AGENT_MEMORY_EXTRACT_LIMIT": "7",
+        }
+
+        result = subprocess.run(
+            [sys.executable, str(STOP_HOOK)],
+            input=json.dumps({"hook_event_name": "Stop", "turn_id": "turn-1"}),
+            text=True,
+            capture_output=True,
+            env=env,
+            check=False,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("extract run --limit 7", log_path.read_text())
 
     def test_bin_launcher_invokes_cli_without_installing(self):
         result = run_bin(

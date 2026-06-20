@@ -25,6 +25,8 @@ All source code lives inside this plugin. The CLI is plain Python plus a small s
 5. A manual or scheduled extraction command processes pending inbox entries.
 6. The CLI calls Codex CLI for semantic extraction, validates the returned plan, applies safe markdown bullets, and updates `processed.jsonl` plus `checkpoint.json`.
 
+Optional synchronous extraction can also run from the Codex `Stop` hook. It is disabled by default and must be enabled with an environment variable.
+
 ## CLI
 
 There are two ways to run the CLI.
@@ -99,6 +101,14 @@ codex exec --full-auto --skip-git-repo-check -
 
 Use `--codex-command /path/to/codex` if `codex` is not on PATH.
 
+Claim a batch without extracting:
+
+```bash
+codex-memory extract claim --limit 20
+```
+
+`extract run` uses the same claim path internally before it calls Codex CLI.
+
 ## Memory Root
 
 Default:
@@ -113,17 +123,65 @@ Override:
 CODEX_AGENT_MEMORY_ROOT=/path/to/memory codex-memory inbox pending --json
 ```
 
-## Hook
+## Hooks
 
-The plugin includes `hooks/hooks.json` with one `UserPromptSubmit` hook. It does not use `SessionStart`, `PreCompact`, or `Stop`.
+The plugin includes:
 
-The hook calls:
+- `UserPromptSubmit`: always records the user prompt into inbox and injects the short memory protocol.
+- `Stop`: optionally runs synchronous extraction at the end of each turn.
+
+`UserPromptSubmit` calls:
 
 ```bash
 python3 scripts/user_prompt_submit_hook.py
 ```
 
-The hook script calls the plugin-local CLI source directly, so the hook does not require `codex-memory` to be installed on PATH. Installing the launcher is for humans, scheduled jobs, and external automation.
+`Stop` calls:
+
+```bash
+python3 scripts/stop_hook.py
+```
+
+The hook scripts can call the plugin-local CLI source directly, so hooks do not require `codex-memory` to be installed on PATH. Installing the launcher is for humans, scheduled jobs, and external automation.
+
+### Enable Stop Extraction
+
+Default: disabled.
+
+Enable synchronous extraction at turn end:
+
+```bash
+export CODEX_AGENT_MEMORY_EXTRACT_ON_STOP=1
+```
+
+Optional settings:
+
+```bash
+export CODEX_AGENT_MEMORY_EXTRACT_LIMIT=50
+export CODEX_AGENT_MEMORY_CLI=/path/to/codex-memory
+export CODEX_AGENT_MEMORY_CODEX_COMMAND=/path/to/codex
+```
+
+The Stop hook waits for extraction to finish, but the CLI only holds the extraction claim lock while choosing and marking a batch. The slower Codex CLI extraction runs outside that lock.
+
+## Concurrency
+
+Extraction uses a short critical section:
+
+```text
+lock system/locks/extract-claim.lock
+  read pending inbox entries
+  append processing records to system/processed.jsonl
+unlock
+run Codex CLI extraction outside the lock
+apply the validated plan
+append processed/ignored records
+update checkpoint
+```
+
+`pending` excludes any inbox item that already has a record in `processed.jsonl`, including `processing`, `processed`, or `ignored`. This means concurrent Stop hooks or scheduled jobs cannot claim the same raw inbox item.
+
+The lock is intentionally narrow: it covers only batch claiming, not semantic extraction or markdown writing.
 
 ## Suggested Automation
 

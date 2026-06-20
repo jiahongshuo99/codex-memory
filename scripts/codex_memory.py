@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import fcntl
 import hashlib
 import json
 import os
@@ -12,7 +13,7 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Dict, Iterable, List, Optional, TextIO
 
 
 DEFAULT_ROOT = Path.home() / ".codex" / "codex-agent-memory"
@@ -120,6 +121,23 @@ def processed_ids(root: Path) -> set[str]:
     return ids
 
 
+class FileLock:
+    def __init__(self, path: Path):
+        self.path = path
+        self.handle: Optional[TextIO] = None
+
+    def __enter__(self) -> "FileLock":
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.handle = self.path.open("w", encoding="utf-8")
+        fcntl.flock(self.handle.fileno(), fcntl.LOCK_EX)
+        return self
+
+    def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
+        if self.handle:
+            fcntl.flock(self.handle.fileno(), fcntl.LOCK_UN)
+            self.handle.close()
+
+
 def command_inbox_append(args: argparse.Namespace) -> int:
     root = memory_root()
     ensure_base(root)
@@ -157,6 +175,39 @@ def command_inbox_pending(args: argparse.Namespace) -> int:
     else:
         for entry in entries:
             print(f"{entry.get('id')} {entry.get('ts')} {entry.get('source')}")
+    return 0
+
+
+def make_batch_id() -> str:
+    timestamp = iso_now().replace("-", "").replace(":", "").replace("+00:00", "Z")
+    digest = hashlib.sha256(os.urandom(32)).hexdigest()[:8]
+    return f"batch_{timestamp}_{digest}"
+
+
+def claim_entries(root: Path, limit: Optional[int]) -> Dict[str, Any]:
+    with FileLock(root / "system" / "locks" / "extract-claim.lock"):
+        entries = pending_entries(root)
+        if limit:
+            entries = entries[:limit]
+        batch_id = make_batch_id()
+        claimed_at = iso_now()
+        for entry in entries:
+            append_jsonl(
+                root / "system" / "processed.jsonl",
+                {
+                    "id": entry["id"],
+                    "status": "processing",
+                    "batch_id": batch_id,
+                    "claimed_at": claimed_at,
+                },
+            )
+        return {"batch_id": batch_id, "entries": entries}
+
+
+def command_extract_claim(args: argparse.Namespace) -> int:
+    root = memory_root()
+    ensure_base(root)
+    print(json.dumps(claim_entries(root, args.limit), ensure_ascii=False))
     return 0
 
 
@@ -301,9 +352,13 @@ Do not keep:
 def command_extract_run(args: argparse.Namespace) -> int:
     root = memory_root()
     ensure_base(root)
-    entries = pending_entries(root)
-    if args.limit:
-        entries = entries[: args.limit]
+    if args.dry_run:
+        entries = pending_entries(root)
+        if args.limit:
+            entries = entries[: args.limit]
+    else:
+        claim = claim_entries(root, args.limit)
+        entries = claim["entries"]
     if not entries:
         print(json.dumps({"status": "no_pending_entries"}, ensure_ascii=False))
         return 0
@@ -374,6 +429,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     extract = sub.add_parser("extract")
     extract_sub = extract.add_subparsers(dest="extract_command", required=True)
+    claim = extract_sub.add_parser("claim")
+    claim.add_argument("--limit", type=int)
+    claim.set_defaults(func=command_extract_claim)
     run = extract_sub.add_parser("run")
     run.add_argument("--dry-run", action="store_true")
     run.add_argument("--limit", type=int)

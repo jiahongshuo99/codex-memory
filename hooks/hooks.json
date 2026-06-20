@@ -11,6 +11,18 @@
           }
         ]
       }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 scripts/stop_hook.py",
+            "timeout": 600,
+            "statusMessage": "Extracting memory"
+          }
+        ]
+      }
     ]
   }
 }
