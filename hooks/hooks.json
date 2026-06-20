@@ -1,0 +1,16 @@
+{
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 scripts/user_prompt_submit_hook.py",
+            "timeout": 10,
+            "statusMessage": "Recording memory inbox"
+          }
+        ]
+      }
+    ]
+  }
+}

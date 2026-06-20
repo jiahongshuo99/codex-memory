@@ -1,0 +1,18 @@
+{
+  "name": "codex-agent-memory",
+  "version": "0.1.0",
+  "description": "Codex Agent Memory plugin",
+  "author": {
+    "name": "Local developer"
+  },
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Codex Agent Memory",
+    "shortDescription": "Use Codex Agent Memory in Codex.",
+    "longDescription": "Codex Agent Memory adds a local Codex plugin scaffold.",
+    "developerName": "Local developer",
+    "category": "Productivity",
+    "capabilities": [],
+    "defaultPrompt": "Help me use Codex Agent Memory."
+  }
+}
