@@ -44,20 +44,21 @@ You must check memory first when:
 - The task resembles a known issue, repeated engineering standard, or domain rule.
 - The current request is ambiguous and stored preferences or project facts could clarify the answer.
 
-Do not start with `rg`, broad file listing, README exploration, web search, or source inspection when one of these conditions applies. Memory is the first-pass cache for durable facts and preferences.
+Do not start with `rg`, broad file listing, broad README exploration, web search, or source inspection when one of these conditions applies. For project-specific facts, a targeted read of the project README.md is allowed and has priority over project memory.
 
 ## Read Flow
 
 1. Identify the workspace key from the prompt, cwd, or project `AGENTS.md` marker.
-2. Read only the likely relevant canonical files, usually 1 to 3 files:
-   - `<repo-root>/.codex/codex-agent-memory/canonical/` for project commands, workflows, stack, standards, and known issues.
+2. For project-specific facts, read the project README.md before project memory. Project README.md has higher priority than project memory.
+3. Read only the likely relevant canonical files, usually 1 to 3 files:
+   - `<repo-root>/.codex/codex-agent-memory/canonical/` for project commands, workflows, stack, standards, and known issues not already covered by README.md.
    - `canonical/user/` for user preferences, constraints, and stable profile.
    - `canonical/engineering/` for reusable engineering standards and workflows.
    - `canonical/domains/` for durable domain facts and rules.
-3. If memory has a plausible answer, use it as the starting point and perform only the smallest necessary verification against the source of truth.
-4. If memory does not answer the task, proceed with normal exploration.
-5. Current user instructions and current source-of-truth data always override stored memory.
-6. If memory conflicts with the current prompt or verified current state, follow the current prompt/current state and mention the conflict when it affects the answer.
+4. If README.md or memory has a plausible answer, use it as the starting point and perform only the smallest necessary verification against the source of truth.
+5. If README.md and memory do not answer the task, proceed with normal exploration.
+6. Current user instructions and current source-of-truth data always override stored memory.
+7. If project memory conflicts with README.md, follow README.md and mention the conflict when it affects the answer.
 
 ## Verification Policy
 
@@ -73,13 +74,13 @@ Memory is a cache, not an authority over mutable facts.
 These thoughts mean you are about to skip memory incorrectly:
 
 - "I can just check the repo quickly."
-- "The answer is probably in README."
+- "The answer is probably somewhere in the repo."
 - "This is a simple CLI/workflow question."
 - "I need to inspect files before reading memory."
 - "Memory is only background context."
 - "I remember the project well enough."
 
-For those cases, read the relevant canonical memory first, then verify narrowly.
+For those cases, read project README.md first when the question is project-specific, then read the relevant canonical memory and verify narrowly.
 
 ## Write Flow
 
@@ -106,6 +107,8 @@ If `CODEX_AGENT_MEMORY_EXTRACT_ON_STOP=1`, the Stop hook also runs synchronous e
 Extraction uses a short claim lock under `system/locks/extract-claim.lock`. The lock is held only while marking a batch as `processing`; Codex CLI extraction runs outside the lock. Entries marked `processing`, `processed`, or `ignored` are not returned by pending queries.
 
 Project-specific extraction writes to `<repo-root>/.codex/codex-agent-memory/canonical/` and stages changed project memory files with `git add`. It does not commit project repository changes.
+
+Do not write project memory that duplicates or conflicts with README.md. During extraction, README.md is treated as the higher-priority project source; project memory should only fill durable gaps that README.md does not already cover.
 
 ## What Belongs In Canonical Memory
 

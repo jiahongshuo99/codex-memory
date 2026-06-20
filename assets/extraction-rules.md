@@ -83,6 +83,13 @@ Keep in project memory only when the fact depends on the concrete repo:
 
 Project memory is routed through `workspace_*` candidate kinds. The extractor uses the source entry `cwd` to resolve the repo root, then writes under `<repo-root>/.codex/codex-agent-memory/`.
 
+Project `README.md` has higher priority than project memory:
+
+- Before creating a `workspace_*` candidate, check the project README content provided in the prompt.
+- Do not create project memory that duplicates information already documented in README.md.
+- Do not create project memory that conflicts with README.md; README.md is the higher-priority project fact source.
+- Use project memory only for durable project facts, workflows, gotchas, or conventions that README.md does not already cover.
+
 ## Domain Memory
 
 Keep:

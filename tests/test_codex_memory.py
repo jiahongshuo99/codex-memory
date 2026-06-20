@@ -102,6 +102,7 @@ class CodexMemoryCliTests(unittest.TestCase):
         self.assertIn("Memory root:", payload["protocol"])
         self.assertIn("Memory-first rule:", payload["protocol"])
         self.assertIn("before broad code search or external lookup", payload["protocol"])
+        self.assertIn("Project README outranks project memory", payload["protocol"])
         self.assertIn("verify only against the smallest necessary source-of-truth surface", payload["protocol"])
         self.assertNotIn("If memory may help", payload["protocol"])
         self.assertNotIn("index.md", payload["protocol"])
@@ -373,6 +374,11 @@ class CodexMemoryCliTests(unittest.TestCase):
     def test_extract_dry_run_includes_memory_structure_contract(self):
         project = self.tmp_path / "example-repo"
         project.mkdir()
+        (project / "README.md").write_text(
+            "# Example Repo\n\n"
+            "Run `npm test` before submitting changes.\n",
+            encoding="utf-8",
+        )
         run_cli(
             self.tmp_path,
             "inbox",
@@ -398,6 +404,9 @@ class CodexMemoryCliTests(unittest.TestCase):
         self.assertIn("type=assistant_message 且 phase=final_answer", result.stdout)
         self.assertIn("不要把方案设计建议", result.stdout)
         self.assertNotIn("prefer the narrower workspace path", result.stdout)
+        self.assertIn("Project README has higher priority than project memory", result.stdout)
+        self.assertIn("Existing project README content", result.stdout)
+        self.assertIn("Run `npm test` before submitting changes.", result.stdout)
 
     def test_apply_plan_accepts_domain_memory_kind(self):
         plan = {
@@ -456,6 +465,55 @@ class CodexMemoryCliTests(unittest.TestCase):
         self.assertIn("A  .codex/codex-agent-memory/canonical/workflows.md", status)
         self.assertNotIn("?? .codex/codex-agent-memory/canonical/workflows.md", status)
         self.assertNotEqual(git_at(project, "log", "--oneline", "-1").returncode, 0)
+
+    def test_workspace_candidate_skips_memory_when_project_readme_already_has_similar_fact(self):
+        project = self.tmp_path / "project-repo"
+        project.mkdir()
+        (project / "README.md").write_text(
+            "# Project Repo\n\n"
+            "项目使用 npm test 运行测试。\n",
+            encoding="utf-8",
+        )
+        entry_id = json.loads(
+            run_cli(
+                self.tmp_path,
+                "inbox",
+                "append",
+                "--type",
+                "user_prompt",
+                "--cwd",
+                str(project),
+                input_text="这个项目用 npm test 跑测试。",
+            ).stdout
+        )["id"]
+        plan = {
+            "candidates": [
+                {
+                    "kind": "workspace_workflow",
+                    "target_file": "canonical/workflows.md",
+                    "content": "项目使用 npm test 运行测试。",
+                    "source_ids": [entry_id],
+                }
+            ],
+            "ignored": [],
+        }
+
+        result = run_cli(self.tmp_path, "plan", "apply", "--stdin", input_text=json.dumps(plan))
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout), {"applied": 0, "ignored": 0})
+        self.assertFalse((project / ".codex" / "codex-agent-memory" / "canonical" / "workflows.md").exists())
+        processed = read_jsonl(self.tmp_path / "memory" / "system" / "processed.jsonl")
+        self.assertEqual(processed[-1]["id"], entry_id)
+        self.assertEqual(processed[-1]["status"], "processed")
+        self.assertEqual(processed[-1]["reason"], "project_readme_already_covers_memory")
+
+    def test_skill_documents_project_readme_priority_over_project_memory(self):
+        text = (PLUGIN_ROOT / "skills" / "codex-agent-memory" / "SKILL.md").read_text(encoding="utf-8")
+
+        self.assertIn("Project README.md has higher priority than project memory", text)
+        self.assertIn("read the project README.md before project memory", text)
+        self.assertIn("Do not write project memory that duplicates or conflicts with README.md", text)
 
     def test_stop_hook_is_disabled_by_default(self):
         env = {

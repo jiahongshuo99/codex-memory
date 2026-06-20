@@ -42,6 +42,8 @@ PROTOCOL_TEMPLATE = (
     "Memory-first rule: for existing workspaces, repeated workflows, prior decisions, user preferences, "
     "constraints, known issues, or durable engineering/domain facts, read the relevant canonical/ memory "
     "before broad code search or external lookup. "
+    "Project README outranks project memory: for project facts, use README.md as the higher-priority source "
+    "and let project memory fill gaps only. "
     "If memory has a plausible answer, use it as the starting point and verify only against the smallest "
     "necessary source-of-truth surface. "
     "Current user instructions and verified current state override memory. "
@@ -883,6 +885,44 @@ def remove_similar_project_bullets(root: Path, target_path: Path, content: str, 
     return changed
 
 
+def project_readme_path(project: Path) -> Path:
+    return project / "README.md"
+
+
+def read_project_readme(project: Path) -> str:
+    path = project_readme_path(project)
+    if not path.exists() or not path.is_file():
+        return ""
+    return path.read_text(encoding="utf-8", errors="replace")
+
+
+def readme_covers_memory(project: Path, content: str) -> bool:
+    readme = read_project_readme(project)
+    if not readme.strip():
+        return False
+    readme_norm = normalized_memory(readme)
+    content_norm = normalized_memory(content)
+    if not readme_norm or not content_norm:
+        return False
+    if content_norm in readme_norm:
+        return True
+    for block in re.split(r"\n\s*\n|(?<=。)|(?<=；)|(?<=\.)", readme):
+        block = block.strip()
+        if block and is_similar_memory(block, content):
+            return True
+    return False
+
+
+def workspace_candidate_readme_project(candidate: Dict[str, Any], sources_by_id: Dict[str, Dict[str, Any]]) -> Optional[Path]:
+    if not is_workspace_kind(candidate.get("kind")):
+        return None
+    try:
+        project = project_root_for_candidate(candidate, sources_by_id)
+    except CliError:
+        return None
+    return project if readme_covers_memory(project, candidate.get("content", "").strip()) else None
+
+
 def upsert_bullet(path: Path, content: str) -> bool:
     path.parent.mkdir(parents=True, exist_ok=True)
     if not path.exists():
@@ -1002,8 +1042,9 @@ def command_plan_apply(args: argparse.Namespace) -> int:
     sources_by_id = source_entry_map(root)
     for candidate in plan.get("candidates", []):
         path = validate_candidate(candidate, root, sources_by_id)
+        readme_project = workspace_candidate_readme_project(candidate, sources_by_id)
         removed_narrower = remove_similar_project_bullets(root, path, candidate["content"].strip(), sources_by_id)
-        changed = upsert_bullet(path, candidate["content"].strip())
+        changed = False if readme_project else upsert_bullet(path, candidate["content"].strip())
         if changed or removed_narrower:
             for changed_path in [path]:
                 if is_under_project_memory(changed_path):
@@ -1012,16 +1053,16 @@ def command_plan_apply(args: argparse.Namespace) -> int:
                 git_add_project_memory_roots(sources_by_id)
         for source_id in candidate["source_ids"]:
             processed_source_ids.append(source_id)
-            append_jsonl(
-                root / "system" / "processed.jsonl",
-                {
-                    "id": source_id,
-                    "status": "processed",
-                    "kind": candidate["kind"],
-                    "target_file": candidate["target_file"],
-                    "processed_at": iso_now(),
-                },
-            )
+            processed_payload = {
+                "id": source_id,
+                "status": "processed",
+                "kind": candidate["kind"],
+                "target_file": candidate["target_file"],
+                "processed_at": iso_now(),
+            }
+            if readme_project:
+                processed_payload["reason"] = "project_readme_already_covers_memory"
+            append_jsonl(root / "system" / "processed.jsonl", processed_payload)
         if changed or removed_narrower:
             applied.append(candidate)
     for item in plan.get("ignored", []):
@@ -1058,6 +1099,8 @@ def extraction_prompt(entries: List[Dict[str, Any]], root: Path) -> str:
         "不要把方案设计建议、备选方案、推测或未被用户确认的建议写入 canonical。\n"
         "生成候选前必须先检查下面的现有 canonical 记忆；如果已有相同或相近内容，不要重复输出候选。"
         "只有确实有新增信息时，才输出可合并后的新候选内容。\n"
+        "Project README has higher priority than project memory. For workspace_* candidates, check README.md first; "
+        "if README.md already covers the fact, do not write duplicate project memory. If README.md conflicts with project memory, prefer README.md.\n"
         "Return only JSON that conforms to assets/extraction-output.schema.json.\n"
         "Each candidate must use a target_file under canonical/.\n"
         "user/engineering/domain candidates write to the global memory root. "
@@ -1067,6 +1110,8 @@ def extraction_prompt(entries: List[Dict[str, Any]], root: Path) -> str:
         f"{canonical_snapshot(root)}\n\n"
         "Existing project canonical memory:\n"
         f"{project_canonical_snapshot(entries)}\n\n"
+        "Existing project README content:\n"
+        f"{project_readme_snapshot(entries)}\n\n"
         "Inbox entries:\n"
         f"{json.dumps(entries, ensure_ascii=False, indent=2)}\n"
     )
@@ -1127,6 +1172,40 @@ def project_canonical_snapshot(entries: List[Dict[str, Any]], *, limit: int = 20
                 return "\n".join(parts)
             parts.append(chunk)
             total += len(chunk)
+    return "\n".join(parts) if parts else "(empty)"
+
+
+def project_roots_for_entries(entries: List[Dict[str, Any]]) -> List[Path]:
+    roots: List[Path] = []
+    seen: set[Path] = set()
+    for entry in entries:
+        project = project_root(entry.get("cwd"))
+        if not project:
+            continue
+        resolved = project.resolve()
+        if resolved in seen:
+            continue
+        roots.append(project)
+        seen.add(resolved)
+    return roots
+
+
+def project_readme_snapshot(entries: List[Dict[str, Any]], *, limit: int = 20000) -> str:
+    parts: List[str] = []
+    total = 0
+    for project in project_roots_for_entries(entries):
+        path = project_readme_path(project)
+        if not path.exists():
+            continue
+        text = path.read_text(encoding="utf-8", errors="replace").strip()
+        if not text:
+            continue
+        chunk = f"## {project} :: README.md\n{text}\n"
+        if total + len(chunk) > limit:
+            parts.append("(truncated)")
+            break
+        parts.append(chunk)
+        total += len(chunk)
     return "\n".join(parts) if parts else "(empty)"
 
 

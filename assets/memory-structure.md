@@ -82,6 +82,8 @@ Projects that use this plugin must document the project memory rule in `AGENTS.m
 
 Project canonical memory should be tracked by the project repository. The extractor stages changed project memory files with `git add`, but it must not commit project repository changes.
 
+Project `README.md` is the higher-priority project fact source. Project memory supplements README.md; it should not duplicate or contradict README.md.
+
 ## Core Areas
 
 ### Global `inbox/`
@@ -162,6 +164,8 @@ Memory that is specific to one concrete repository or project.
 - `gotchas.md`: project-specific caveats and failure patterns.
 
 Use this module only when the memory would be misleading outside that project.
+
+Project README.md has higher priority than this module. If README.md already documents a command, workflow, stack fact, or convention, do not duplicate it in project memory. If project memory conflicts with README.md, prefer README.md.
 
 For extraction output, workspace candidate `target_file` values are relative to the project memory root and must still start with `canonical/`, for example:
 
