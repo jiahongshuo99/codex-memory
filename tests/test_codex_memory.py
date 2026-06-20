@@ -103,7 +103,10 @@ class CodexMemoryCliTests(unittest.TestCase):
         agents_text = (project / "AGENTS.md").read_text(encoding="utf-8")
         self.assertIn("codex-agent-memory workspace-key: example-repo", agents_text)
         self.assertTrue((self.tmp_path / "memory" / ".git").exists())
-        self.assertIn("tmp/", (self.tmp_path / "memory" / ".gitignore").read_text(encoding="utf-8"))
+        gitignore = (self.tmp_path / "memory" / ".gitignore").read_text(encoding="utf-8")
+        self.assertIn("*", gitignore)
+        self.assertIn("!/canonical/**", gitignore)
+        self.assertIn("!/system/extract-jobs.jsonl", gitignore)
 
     def test_workspace_key_reuses_project_agents_file(self):
         project = self.tmp_path / "Readable Project"
@@ -405,6 +408,43 @@ class CodexMemoryCliTests(unittest.TestCase):
         status = git(self.tmp_path, "status", "--porcelain")
         self.assertEqual(status.returncode, 0, status.stderr)
         self.assertEqual(status.stdout.strip(), "")
+
+    def test_extract_run_untracks_ignored_job_logs_before_commit(self):
+        entry_id = json.loads(
+            run_cli(self.tmp_path, "inbox", "append", "--source", "user_prompt", input_text="记住我喜欢中文").stdout
+        )["id"]
+        fake_codex = self.tmp_path / "fake-codex.py"
+        fake_codex.write_text(
+            "#!/usr/bin/env python3\n"
+            "import json, pathlib, sys\n"
+            "out = pathlib.Path(sys.argv[sys.argv.index('--output-last-message') + 1])\n"
+            f"out.write_text(json.dumps({{'candidates': [], 'ignored': [{{'source_id': {entry_id!r}}}]}}), encoding='utf-8')\n",
+            encoding="utf-8",
+        )
+        fake_codex.chmod(0o755)
+        run_cli(self.tmp_path, "extract", "run", "--job-id", "job-first", "--codex-command", str(fake_codex))
+
+        old_log = self.tmp_path / "memory" / "system" / "extract-jobs" / "old.stderr.log"
+        old_log.parent.mkdir(parents=True, exist_ok=True)
+        old_log.write_text("old raw stderr\n", encoding="utf-8")
+        self.assertEqual(git(self.tmp_path, "add", "-f", "system/extract-jobs/old.stderr.log").returncode, 0)
+        self.assertEqual(git(self.tmp_path, "commit", "-m", "track old raw job log").returncode, 0)
+        self.assertIn("system/extract-jobs/old.stderr.log", git(self.tmp_path, "ls-files").stdout)
+
+        second_id = json.loads(
+            run_cli(self.tmp_path, "inbox", "append", "--source", "user_prompt", input_text="记住我喜欢直接回答").stdout
+        )["id"]
+        fake_codex.write_text(
+            "#!/usr/bin/env python3\n"
+            "import json, pathlib, sys\n"
+            "out = pathlib.Path(sys.argv[sys.argv.index('--output-last-message') + 1])\n"
+            f"out.write_text(json.dumps({{'candidates': [], 'ignored': [{{'source_id': {second_id!r}}}]}}), encoding='utf-8')\n",
+            encoding="utf-8",
+        )
+        result = run_cli(self.tmp_path, "extract", "run", "--job-id", "job-second", "--codex-command", str(fake_codex))
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("system/extract-jobs/old.stderr.log", git(self.tmp_path, "ls-files").stdout)
 
     def test_extract_run_skips_when_job_lock_is_held(self):
         run_cli(self.tmp_path, "inbox", "append", "--source", "user_prompt", input_text="one")

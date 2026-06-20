@@ -177,6 +177,23 @@ def run_git(root: Path, *args: str) -> subprocess.CompletedProcess[str]:
     )
 
 
+MEMORY_GITIGNORE = """\
+*
+!/.gitignore
+!/canonical/
+!/canonical/**
+!/inbox/
+!/inbox/user-prompts.jsonl
+!/system/
+!/system/checkpoint.json
+!/system/extract-jobs.jsonl
+!/system/extraction-log.jsonl
+!/system/hook-flow.jsonl
+!/system/processed.jsonl
+!/system/extraction-rules.md
+"""
+
+
 def ensure_git_repo(root: Path) -> None:
     root.mkdir(parents=True, exist_ok=True)
     if not (root / ".git").exists():
@@ -184,16 +201,8 @@ def ensure_git_repo(root: Path) -> None:
         if init.returncode != 0:
             raise CliError(init.stderr.strip() or "failed to initialize memory git repo")
     gitignore = root / ".gitignore"
-    desired = "tmp/\nsystem/locks/\n"
-    if gitignore.exists():
-        text = gitignore.read_text(encoding="utf-8")
-        additions = [line for line in desired.splitlines() if line and line not in text.splitlines()]
-        if additions:
-            if text and not text.endswith("\n"):
-                text += "\n"
-            gitignore.write_text(text + "\n".join(additions) + "\n", encoding="utf-8")
-    else:
-        gitignore.write_text(desired, encoding="utf-8")
+    if not gitignore.exists() or gitignore.read_text(encoding="utf-8") != MEMORY_GITIGNORE:
+        gitignore.write_text(MEMORY_GITIGNORE, encoding="utf-8")
     if run_git(root, "config", "--get", "user.name").returncode != 0:
         run_git(root, "config", "user.name", "Codex Agent Memory")
     if run_git(root, "config", "--get", "user.email").returncode != 0:
@@ -207,8 +216,31 @@ def git_has_changes(root: Path) -> bool:
     return bool(status.stdout.strip())
 
 
+def untrack_ignored_files(root: Path) -> None:
+    ignored = subprocess.run(
+        ["git", "-C", str(root), "ls-files", "-ci", "--exclude-standard", "-z"],
+        text=False,
+        capture_output=True,
+        check=False,
+    )
+    if ignored.returncode != 0:
+        raise CliError(ignored.stderr.decode("utf-8", errors="replace").strip() or "failed to inspect ignored tracked files")
+    paths = [path.decode("utf-8", errors="replace") for path in ignored.stdout.split(b"\0") if path]
+    if not paths:
+        return
+    remove = subprocess.run(
+        ["git", "-C", str(root), "rm", "--cached", "--ignore-unmatch", "-r", "--", *paths],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if remove.returncode != 0:
+        raise CliError(remove.stderr.strip() or "failed to untrack ignored memory files")
+
+
 def commit_memory_changes(root: Path, *, job_id: Optional[str], reason: str) -> Optional[str]:
     ensure_git_repo(root)
+    untrack_ignored_files(root)
     add = run_git(root, "add", "-A")
     if add.returncode != 0:
         raise CliError(add.stderr.strip() or "failed to stage memory changes")
