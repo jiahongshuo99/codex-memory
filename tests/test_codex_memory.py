@@ -12,6 +12,7 @@ CLI = PLUGIN_ROOT / "scripts" / "codex_memory.py"
 BIN = PLUGIN_ROOT / "bin" / "codex-memory"
 INSTALLER = PLUGIN_ROOT / "scripts" / "install_cli.py"
 STOP_HOOK = PLUGIN_ROOT / "scripts" / "stop_hook.py"
+USER_PROMPT_HOOK = PLUGIN_ROOT / "scripts" / "user_prompt_submit_hook.py"
 
 
 def run_cli(tmp_path, *args, input_text=None):
@@ -231,6 +232,74 @@ class CodexMemoryCliTests(unittest.TestCase):
 
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("extract run --limit 7", log_path.read_text())
+
+    def test_hooks_do_not_write_flow_log_when_debug_is_disabled(self):
+        memory_root = self.tmp_path / "memory"
+        env = {**os.environ, "CODEX_AGENT_MEMORY_ROOT": str(memory_root)}
+        result = subprocess.run(
+            [sys.executable, str(USER_PROMPT_HOOK)],
+            input=json.dumps(
+                {
+                    "prompt": "debug disabled",
+                    "session_id": "sess-1",
+                    "turn_id": "turn-1",
+                    "cwd": "/tmp/example-repo",
+                }
+            ),
+            text=True,
+            capture_output=True,
+            env=env,
+            check=False,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse((memory_root / "system" / "hook-flow.jsonl").exists())
+
+    def test_hooks_write_flow_log_when_debug_is_enabled(self):
+        memory_root = self.tmp_path / "memory"
+        env = {
+            **os.environ,
+            "CODEX_AGENT_MEMORY_ROOT": str(memory_root),
+            "CODEX_AGENT_MEMORY_DEBUG": "1",
+        }
+        user_prompt = subprocess.run(
+            [sys.executable, str(USER_PROMPT_HOOK)],
+            input=json.dumps(
+                {
+                    "prompt": "debug enabled",
+                    "session_id": "sess-1",
+                    "turn_id": "turn-1",
+                    "cwd": "/tmp/example-repo",
+                }
+            ),
+            text=True,
+            capture_output=True,
+            env=env,
+            check=False,
+        )
+        stop = subprocess.run(
+            [sys.executable, str(STOP_HOOK)],
+            input=json.dumps({"hook_event_name": "Stop", "turn_id": "turn-1"}),
+            text=True,
+            capture_output=True,
+            env=env,
+            check=False,
+        )
+
+        self.assertEqual(user_prompt.returncode, 0, user_prompt.stderr)
+        self.assertEqual(stop.returncode, 0, stop.stderr)
+        rows = read_jsonl(memory_root / "system" / "hook-flow.jsonl")
+        self.assertEqual([row["hook"] for row in rows], ["UserPromptSubmit", "Stop"])
+        self.assertEqual(rows[0]["status"], "ok")
+        self.assertEqual(rows[0]["session_id"], "sess-1")
+        self.assertEqual(rows[0]["turn_id"], "turn-1")
+        self.assertEqual(rows[0]["workspace_key"], "example-repo")
+        self.assertEqual(rows[0]["action"], "inbox_append")
+        self.assertEqual(rows[0]["action_returncode"], 0)
+        self.assertTrue(rows[0]["entry_id"].startswith("up_"))
+        self.assertEqual(rows[1]["status"], "skipped")
+        self.assertEqual(rows[1]["action"], "extract_run")
+        self.assertFalse(rows[1]["extract_on_stop"])
 
     def test_bin_launcher_invokes_cli_without_installing(self):
         result = run_bin(

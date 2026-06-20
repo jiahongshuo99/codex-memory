@@ -1,11 +1,12 @@
 {
   "name": "codex-agent-memory",
-  "version": "0.1.0+codex.20260620114918",
+  "version": "0.1.0+codex.20260620120751",
   "description": "Codex Agent Memory plugin",
   "author": {
     "name": "Local developer"
   },
   "skills": "./skills/",
+  "hooks": "./hooks/hooks.json",
   "interface": {
     "displayName": "Codex Agent Memory",
     "shortDescription": "Use Codex Agent Memory in Codex.",
