@@ -146,6 +146,10 @@ The default timeout for one Codex extraction call is 900 seconds; override with 
 `CODEX_AGENT_MEMORY_EXTRACT_TIMEOUT_SEC`.
 Use `--codex-command /path/to/codex` if `codex` is not on PATH.
 
+Extraction sets `CODEX_AGENT_MEMORY_INTERNAL_EXTRACT=1` for its child `codex exec` process. The
+plugin hooks skip themselves when this variable is present, which prevents extraction sessions from
+recording their own prompts or starting another extraction loop.
+
 Claim a batch without extracting:
 
 ```bash

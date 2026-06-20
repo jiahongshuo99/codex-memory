@@ -15,6 +15,7 @@ from hook_debug import text_snippet, write_flow_log
 
 
 TRUE_VALUES = {"1", "true", "yes", "on"}
+INTERNAL_EXTRACT_ENV = "CODEX_AGENT_MEMORY_INTERNAL_EXTRACT"
 
 
 def enabled() -> bool:
@@ -41,6 +42,14 @@ def main() -> int:
         "action": "extract_start",
         "turn_id": payload.get("turn_id"),
     }
+    if os.environ.get(INTERNAL_EXTRACT_ENV):
+        log_record["status"] = "skipped"
+        log_record["skip_reason"] = "internal_extract"
+        log_record["extract_on_stop"] = False
+        log_record["duration_ms"] = round((time.monotonic() - started) * 1000)
+        write_flow_log(log_record)
+        return 0
+
     if not enabled():
         log_record["status"] = "skipped"
         log_record["extract_on_stop"] = False

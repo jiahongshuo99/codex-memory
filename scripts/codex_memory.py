@@ -26,6 +26,7 @@ DEFAULT_EXTRACT_MODEL = "gpt-5.4"
 DEFAULT_EXTRACT_EFFORT = "medium"
 DEFAULT_EXTRACT_MAX_BATCH_CHARS = 100_000
 DEFAULT_EXTRACT_TIMEOUT_SEC = 900
+INTERNAL_EXTRACT_ENV = "CODEX_AGENT_MEMORY_INTERNAL_EXTRACT"
 LOG_SNIPPET_CHARS = 1200
 ALLOWED_KINDS = {
     "user_preference",
@@ -715,6 +716,8 @@ def run_codex_extraction(
             },
         )
     started = time.monotonic()
+    env = os.environ.copy()
+    env[INTERNAL_EXTRACT_ENV] = "1"
     try:
         run = subprocess.run(
             command,
@@ -723,6 +726,7 @@ def run_codex_extraction(
             capture_output=True,
             check=False,
             timeout=timeout_sec,
+            env=env,
         )
     except subprocess.TimeoutExpired as exc:
         stderr = exc.stderr if isinstance(exc.stderr, str) else (exc.stderr or b"").decode("utf-8", "replace")

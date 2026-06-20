@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 import time
@@ -11,6 +12,9 @@ from pathlib import Path
 from typing import Optional
 
 from hook_debug import payload_summary, text_snippet, write_flow_log
+
+
+INTERNAL_EXTRACT_ENV = "CODEX_AGENT_MEMORY_INTERNAL_EXTRACT"
 
 
 def filter_reason(prompt: str) -> Optional[str]:
@@ -41,6 +45,13 @@ def main() -> int:
         "action": "inbox_append",
         **payload_summary(payload),
     }
+    if os.environ.get(INTERNAL_EXTRACT_ENV):
+        log_record["status"] = "skipped"
+        log_record["skip_reason"] = "internal_extract"
+        log_record["duration_ms"] = round((time.monotonic() - started) * 1000)
+        write_flow_log(log_record)
+        return 0
+
     script_dir = Path(__file__).resolve().parent
     cli = script_dir / "codex_memory.py"
     prompt = payload.get("prompt", "")

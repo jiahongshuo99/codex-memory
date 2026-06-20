@@ -294,8 +294,8 @@ class CodexMemoryCliTests(unittest.TestCase):
         argv_path = self.tmp_path / "fake-codex-argv.json"
         fake_codex.write_text(
             "#!/usr/bin/env python3\n"
-            "import json, pathlib, sys\n"
-            f"pathlib.Path({str(argv_path)!r}).write_text(json.dumps(sys.argv, ensure_ascii=False), encoding='utf-8')\n"
+            "import json, os, pathlib, sys\n"
+            f"pathlib.Path({str(argv_path)!r}).write_text(json.dumps({{'argv': sys.argv, 'internal': os.environ.get('CODEX_AGENT_MEMORY_INTERNAL_EXTRACT')}}, ensure_ascii=False), encoding='utf-8')\n"
             "out = pathlib.Path(sys.argv[sys.argv.index('--output-last-message') + 1])\n"
             "out.write_text(json.dumps({'candidates': [], 'ignored': []}), encoding='utf-8')\n",
             encoding="utf-8",
@@ -315,7 +315,9 @@ class CodexMemoryCliTests(unittest.TestCase):
         )
 
         self.assertEqual(result.returncode, 0, result.stderr)
-        argv = json.loads(argv_path.read_text(encoding="utf-8"))
+        captured = json.loads(argv_path.read_text(encoding="utf-8"))
+        argv = captured["argv"]
+        self.assertEqual(captured["internal"], "1")
         self.assertIn("--model", argv)
         self.assertEqual(argv[argv.index("--model") + 1], "gpt-5.4")
         self.assertIn('model_reasoning_effort="medium"', argv)
@@ -523,6 +525,53 @@ class CodexMemoryCliTests(unittest.TestCase):
         rows = read_jsonl(memory_root / "system" / "hook-flow.jsonl")
         self.assertEqual(rows[0]["status"], "filtered")
         self.assertEqual(rows[0]["filter_reason"], "hook_prompt_injection")
+
+    def test_hooks_skip_during_internal_extract(self):
+        memory_root = self.tmp_path / "memory"
+        fake_bin = self.tmp_path / "fake-bin"
+        fake_bin.mkdir()
+        called = self.tmp_path / "called"
+        fake_cli = fake_bin / "codex-memory"
+        fake_cli.write_text(
+            "#!/usr/bin/env sh\n"
+            f"touch {called}\n",
+            encoding="utf-8",
+        )
+        fake_cli.chmod(0o755)
+        env = {
+            **os.environ,
+            "PATH": f"{fake_bin}:{os.environ.get('PATH', '')}",
+            "CODEX_AGENT_MEMORY_ROOT": str(memory_root),
+            "CODEX_AGENT_MEMORY_DEBUG": "1",
+            "CODEX_AGENT_MEMORY_EXTRACT_ON_STOP": "1",
+            "CODEX_AGENT_MEMORY_INTERNAL_EXTRACT": "1",
+        }
+
+        user_prompt = subprocess.run(
+            [sys.executable, str(USER_PROMPT_HOOK)],
+            input=json.dumps({"prompt": "should skip", "session_id": "sess-1", "turn_id": "turn-1", "cwd": "/tmp/example-repo"}),
+            text=True,
+            capture_output=True,
+            env=env,
+            check=False,
+        )
+        stop = subprocess.run(
+            [sys.executable, str(STOP_HOOK)],
+            input=json.dumps({"hook_event_name": "Stop", "turn_id": "turn-1"}),
+            text=True,
+            capture_output=True,
+            env=env,
+            check=False,
+        )
+
+        self.assertEqual(user_prompt.returncode, 0, user_prompt.stderr)
+        self.assertEqual(stop.returncode, 0, stop.stderr)
+        self.assertFalse((memory_root / "inbox" / "user-prompts.jsonl").exists())
+        self.assertFalse(called.exists())
+        rows = read_jsonl(memory_root / "system" / "hook-flow.jsonl")
+        self.assertEqual([row["hook"] for row in rows], ["UserPromptSubmit", "Stop"])
+        self.assertEqual([row["status"] for row in rows], ["skipped", "skipped"])
+        self.assertEqual([row["skip_reason"] for row in rows], ["internal_extract", "internal_extract"])
 
     def test_bin_launcher_invokes_cli_without_installing(self):
         result = run_bin(
