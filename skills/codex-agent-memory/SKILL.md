@@ -1,6 +1,6 @@
 ---
 name: codex-agent-memory
-description: Use when a task may benefit from durable user preferences, user constraints, or reusable engineering standards stored by the Codex Agent Memory plugin.
+description: Use before code search or external lookup when a task involves an existing workspace, repeated workflow, prior decision, user preference, user constraint, known issue, or durable engineering/domain memory stored by the Codex Agent Memory plugin.
 ---
 
 # Codex Agent Memory
@@ -23,22 +23,55 @@ Override with:
 CODEX_AGENT_MEMORY_ROOT=/path/to/memory
 ```
 
-## When To Read Memory
+## Memory-First Rule
 
-Read memory only when it may help the current task:
+If there is even a modest chance that durable memory could answer or narrow the task, read relevant canonical memory before code search, broad repository exploration, or external lookup.
 
-- The user asks about prior preferences, constraints, or decisions.
-- The task involves an existing project or repeated engineering workflow.
+You must check memory first when:
+
+- The task is inside a workspace with a `codex-agent-memory workspace-key` marker.
+- The user asks about an existing project, CLI, command, workflow, test, release process, hook, configuration, or recurring debugging path.
+- The user asks about prior preferences, constraints, decisions, or "what we decided before".
 - The user asks Codex to remember, apply, or check a preference.
-- The current request is ambiguous and stored preferences could clarify style or process.
+- The task resembles a known issue, repeated engineering standard, or domain rule.
+- The current request is ambiguous and stored preferences or project facts could clarify the answer.
+
+Do not start with `rg`, broad file listing, README exploration, web search, or source inspection when one of these conditions applies. Memory is the first-pass cache for durable facts and preferences.
 
 ## Read Flow
 
-1. Use `assets/memory-structure.md` from this plugin to choose the relevant canonical module.
-2. Read only relevant files under `canonical/`.
-3. Treat memory as background context.
-4. Current user instructions always override stored memory.
-5. If memory conflicts with the current prompt, follow the current prompt and mention the conflict if it matters.
+1. Identify the workspace key from the prompt, cwd, or project `AGENTS.md` marker.
+2. Read only the likely relevant canonical files, usually 1 to 3 files:
+   - `canonical/workspaces/<workspace-key>/` for project commands, workflows, stack, standards, and known issues.
+   - `canonical/user/` for user preferences, constraints, and stable profile.
+   - `canonical/engineering/` for reusable engineering standards and workflows.
+   - `canonical/domains/` for durable domain facts and rules.
+3. If memory has a plausible answer, use it as the starting point and perform only the smallest necessary verification against the source of truth.
+4. If memory does not answer the task, proceed with normal exploration.
+5. Current user instructions and current source-of-truth data always override stored memory.
+6. If memory conflicts with the current prompt or verified current state, follow the current prompt/current state and mention the conflict when it affects the answer.
+
+## Verification Policy
+
+Memory is a cache, not an authority over mutable facts.
+
+- User preferences and explicit constraints usually do not need verification unless the current prompt conflicts.
+- Project commands, CLI flags, hooks, configuration, and workflows should be verified with a targeted read or narrow search, not broad rediscovery.
+- Current code behavior should be verified against the smallest relevant code or config surface.
+- External facts that may change, such as prices, laws, package versions, API availability, or schedules, require current source verification.
+
+## Red Flags
+
+These thoughts mean you are about to skip memory incorrectly:
+
+- "I can just check the repo quickly."
+- "The answer is probably in README."
+- "This is a simple CLI/workflow question."
+- "I need to inspect files before reading memory."
+- "Memory is only background context."
+- "I remember the project well enough."
+
+For those cases, read the relevant canonical memory first, then verify narrowly.
 
 ## Write Flow
 

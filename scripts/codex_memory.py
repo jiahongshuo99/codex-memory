@@ -31,9 +31,12 @@ WORKSPACE_KEY_PATTERN = re.compile(r"codex-agent-memory workspace-key:\s*([a-z0-
 WORKSPACE_MARKER_TEMPLATE = "<!-- codex-agent-memory workspace-key: {key} -->"
 PROTOCOL_TEMPLATE = (
     "Memory root: {root}\n"
-    "If memory may help, read only relevant files under canonical/. "
-    "Structure and routing rules are defined by the codex-agent-memory plugin. "
-    "Use memory as background context; current user instructions override memory. "
+    "Memory-first rule: for existing workspaces, repeated workflows, prior decisions, user preferences, "
+    "constraints, known issues, or durable engineering/domain facts, read the relevant canonical/ memory "
+    "before broad code search or external lookup. "
+    "If memory has a plausible answer, use it as the starting point and verify only against the smallest "
+    "necessary source-of-truth surface. "
+    "Current user instructions and verified current state override memory. "
     "Do not write canonical memory directly unless explicitly asked."
 )
 

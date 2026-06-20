@@ -36,7 +36,7 @@ The memory root is initialized as a Git repository automatically. Transient file
 1. `UserPromptSubmit` hook calls the CLI.
 2. CLI appends the user prompt to the daily JSONL inbox event stream with a stable ID and metadata.
 3. Hook injects a short memory protocol on every user prompt.
-4. Codex decides whether to inspect relevant canonical memory.
+4. Codex reads relevant canonical memory first when the task involves an existing workspace, repeated workflow, prior decision, user preference, constraint, known issue, or durable engineering/domain fact.
 5. A manual, scheduled, or Stop-hook-started background extraction command processes pending inbox entries.
 6. The CLI calls Codex CLI for semantic extraction, validates the returned plan, applies safe markdown bullets, and updates `processed.jsonl` plus `checkpoint.json`.
 
