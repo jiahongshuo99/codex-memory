@@ -126,8 +126,12 @@ codex-memory extract start --limit 20
 View the extraction job board:
 
 ```bash
-codex-memory extract jobs --json
+codex-memory extract jobs
 ```
+
+By default, `extract jobs` shows only active jobs (`started` or `running`). Use `--all` to show every
+latest job, `--status failed` to filter by status, and `--limit N` to cap the displayed result count.
+All display modes also support `--json`.
 
 Job state is recorded in `system/extract-jobs.jsonl`. Background job stdout/stderr logs are stored under `system/extract-jobs/`.
 Job events include phase-level records such as `batch_claimed`, `codex_start`, `codex_finished`,

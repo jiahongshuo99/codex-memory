@@ -274,7 +274,7 @@ class CodexMemoryCliTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("extract start --limit 7", log_path.read_text())
 
-    def test_extract_jobs_summarizes_latest_job_statuses(self):
+    def test_extract_jobs_defaults_to_active_jobs(self):
         jobs = self.tmp_path / "memory" / "system" / "extract-jobs.jsonl"
         jobs.parent.mkdir(parents=True, exist_ok=True)
         rows = [
@@ -288,6 +288,54 @@ class CodexMemoryCliTests(unittest.TestCase):
         jobs.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
 
         result = run_cli(self.tmp_path, "extract", "jobs", "--json")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["scope"], "active")
+        self.assertEqual(payload["statuses"], ["running", "started"])
+        self.assertEqual(payload["counts"], {"started": 1})
+        self.assertEqual(payload["total_counts"], {"failed": 1, "started": 1, "succeeded": 1})
+        self.assertEqual([job["job_id"] for job in payload["jobs"]], ["job-2"])
+
+    def test_extract_jobs_can_show_all_or_selected_statuses(self):
+        jobs = self.tmp_path / "memory" / "system" / "extract-jobs.jsonl"
+        jobs.parent.mkdir(parents=True, exist_ok=True)
+        rows = [
+            {"job_id": "job-1", "status": "succeeded", "finished_at": "2026-06-20T10:00:02+00:00"},
+            {"job_id": "job-2", "status": "started", "started_at": "2026-06-20T10:01:00+00:00"},
+            {"job_id": "job-3", "status": "failed", "finished_at": "2026-06-20T10:02:02+00:00"},
+        ]
+        jobs.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
+
+        all_result = run_cli(self.tmp_path, "extract", "jobs", "--json", "--all", "--limit", "2")
+        failed_result = run_cli(self.tmp_path, "extract", "jobs", "--json", "--status", "failed")
+
+        self.assertEqual(all_result.returncode, 0, all_result.stderr)
+        all_payload = json.loads(all_result.stdout)
+        self.assertEqual(all_payload["scope"], "all")
+        self.assertIsNone(all_payload["statuses"])
+        self.assertEqual([job["job_id"] for job in all_payload["jobs"]], ["job-3", "job-2"])
+
+        self.assertEqual(failed_result.returncode, 0, failed_result.stderr)
+        failed_payload = json.loads(failed_result.stdout)
+        self.assertEqual(failed_payload["scope"], "status")
+        self.assertEqual(failed_payload["statuses"], ["failed"])
+        self.assertEqual([job["job_id"] for job in failed_payload["jobs"]], ["job-3"])
+
+    def test_extract_jobs_summarizes_latest_job_statuses_with_all(self):
+        jobs = self.tmp_path / "memory" / "system" / "extract-jobs.jsonl"
+        jobs.parent.mkdir(parents=True, exist_ok=True)
+        rows = [
+            {"job_id": "job-1", "status": "started", "pid": 101, "started_at": "2026-06-20T10:00:00+00:00"},
+            {"job_id": "job-1", "status": "running", "running_at": "2026-06-20T10:00:01+00:00"},
+            {"job_id": "job-1", "status": "succeeded", "finished_at": "2026-06-20T10:00:02+00:00", "returncode": 0},
+            {"job_id": "job-2", "status": "started", "pid": 102, "started_at": "2026-06-20T10:01:00+00:00"},
+            {"job_id": "job-3", "status": "started", "pid": 103, "started_at": "2026-06-20T10:02:00+00:00"},
+            {"job_id": "job-3", "status": "failed", "finished_at": "2026-06-20T10:02:02+00:00", "returncode": 1},
+        ]
+        jobs.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
+
+        result = run_cli(self.tmp_path, "extract", "jobs", "--json", "--all")
 
         self.assertEqual(result.returncode, 0, result.stderr)
         payload = json.loads(result.stdout)

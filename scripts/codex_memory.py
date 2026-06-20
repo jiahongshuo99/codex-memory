@@ -432,22 +432,55 @@ def latest_jobs(root: Path) -> List[Dict[str, Any]]:
     return [latest[job_id] for job_id in order]
 
 
-def command_extract_jobs(args: argparse.Namespace) -> int:
-    root = memory_root()
-    ensure_base(root)
-    jobs = latest_jobs(root)
+ACTIVE_JOB_STATUSES = {"started", "running"}
+JOB_STATUS_CHOICES = ("started", "running", "succeeded", "failed", "skipped")
+
+
+def count_job_statuses(jobs: Iterable[Dict[str, Any]]) -> Dict[str, int]:
     counts: Dict[str, int] = {}
     for job in jobs:
         status = job.get("status", "unknown")
         counts[status] = counts.get(status, 0) + 1
-    payload = {"counts": counts, "jobs": jobs}
+    return counts
+
+
+def command_extract_jobs(args: argparse.Namespace) -> int:
+    root = memory_root()
+    ensure_base(root)
+    all_jobs = latest_jobs(root)
+    if args.all:
+        statuses = None
+        scope = "all"
+    elif args.status:
+        statuses = set(args.status)
+        scope = "status"
+    else:
+        statuses = ACTIVE_JOB_STATUSES
+        scope = "active"
+    jobs = [job for job in all_jobs if statuses is None or job.get("status") in statuses]
+    jobs = list(reversed(jobs))
+    if args.limit is not None:
+        jobs = jobs[: args.limit]
+    counts = count_job_statuses(jobs)
+    payload = {
+        "scope": scope,
+        "statuses": sorted(statuses) if statuses is not None else None,
+        "counts": counts,
+        "total_counts": count_job_statuses(all_jobs),
+        "jobs": jobs,
+    }
     if args.json:
         print(json.dumps(payload, ensure_ascii=False))
     else:
+        status_label = "all" if statuses is None else ",".join(sorted(statuses))
+        print(f"scope: {scope} statuses={status_label} shown={len(jobs)} total={len(all_jobs)}")
         for status, count in sorted(counts.items()):
             print(f"{status}: {count}")
         for job in jobs:
-            print(f"{job.get('job_id')} {job.get('status')} pid={job.get('pid', '')}")
+            print(
+                f"{job.get('job_id')} {job.get('status')} "
+                f"pid={job.get('pid', '')} started={job.get('started_at', '')} finished={job.get('finished_at', '')}"
+            )
     return 0
 
 
@@ -1236,6 +1269,9 @@ def build_parser() -> argparse.ArgumentParser:
     start.set_defaults(func=command_extract_start)
     jobs = extract_sub.add_parser("jobs")
     jobs.add_argument("--json", action="store_true")
+    jobs.add_argument("--all", action="store_true", help="show all jobs instead of only active jobs")
+    jobs.add_argument("--status", action="append", choices=JOB_STATUS_CHOICES, help="show jobs with this status")
+    jobs.add_argument("--limit", type=int, help="maximum number of jobs to show after filtering")
     jobs.set_defaults(func=command_extract_jobs)
     return parser
 
