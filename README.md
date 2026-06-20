@@ -28,6 +28,9 @@ The full memory directory contract lives in [assets/memory-structure.md](assets/
   tmp/
 ```
 
+The memory root is initialized as a Git repository automatically. Transient files under `tmp/` and
+`system/locks/` are ignored.
+
 ## Flow
 
 1. `UserPromptSubmit` hook calls the CLI.
@@ -110,6 +113,10 @@ codex-memory extract run --limit 20
 additional batches. A single entry is never split or truncated. If one entry alone exceeds the batch
 budget, it is marked `failed` with reason `entry_exceeds_max_batch_chars`.
 
+Extraction is serialized with `system/locks/extract-job.lock`. If another extraction job is already
+running, a new run exits with `skipped` and does not claim inbox entries. At the end of each real
+extraction run, the memory root is committed with Git so memory changes can be reviewed over time.
+
 Start extraction asynchronously and return immediately:
 
 ```bash
@@ -160,6 +167,14 @@ codex-memory extract claim --limit 20
 Claimed entries first receive `processing`. Normal terminal states are `processed` or `ignored`;
 extraction failures and oversize entries are marked `failed` so they do not remain stuck in
 `processing`.
+
+On macOS, prefer `launchd` for periodic extraction. A user LaunchAgent can run:
+
+```bash
+codex-memory extract start --limit 50
+```
+
+Use `StartInterval` for simple intervals, or `StartCalendarInterval` for calendar-style schedules.
 
 Read the extraction audit log:
 

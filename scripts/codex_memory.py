@@ -88,6 +88,7 @@ def ensure_base(root: Path) -> None:
         "tmp",
     ]:
         (root / rel).mkdir(parents=True, exist_ok=True)
+    ensure_git_repo(root)
 
 
 def read_stdin_text() -> str:
@@ -188,6 +189,62 @@ def error_event(error_code: str, stderr: Optional[str] = None, stdout: Optional[
     }
 
 
+def run_git(root: Path, *args: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ["git", "-C", str(root), *args],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+
+def ensure_git_repo(root: Path) -> None:
+    root.mkdir(parents=True, exist_ok=True)
+    if not (root / ".git").exists():
+        init = run_git(root, "init")
+        if init.returncode != 0:
+            raise CliError(init.stderr.strip() or "failed to initialize memory git repo")
+    gitignore = root / ".gitignore"
+    desired = "tmp/\nsystem/locks/\n"
+    if gitignore.exists():
+        text = gitignore.read_text(encoding="utf-8")
+        additions = [line for line in desired.splitlines() if line and line not in text.splitlines()]
+        if additions:
+            if text and not text.endswith("\n"):
+                text += "\n"
+            gitignore.write_text(text + "\n".join(additions) + "\n", encoding="utf-8")
+    else:
+        gitignore.write_text(desired, encoding="utf-8")
+    if run_git(root, "config", "--get", "user.name").returncode != 0:
+        run_git(root, "config", "user.name", "Codex Agent Memory")
+    if run_git(root, "config", "--get", "user.email").returncode != 0:
+        run_git(root, "config", "user.email", "codex-agent-memory@local")
+
+
+def git_has_changes(root: Path) -> bool:
+    status = run_git(root, "status", "--porcelain")
+    if status.returncode != 0:
+        raise CliError(status.stderr.strip() or "failed to inspect memory git status")
+    return bool(status.stdout.strip())
+
+
+def commit_memory_changes(root: Path, *, job_id: Optional[str], reason: str) -> Optional[str]:
+    ensure_git_repo(root)
+    add = run_git(root, "add", "-A")
+    if add.returncode != 0:
+        raise CliError(add.stderr.strip() or "failed to stage memory changes")
+    if not git_has_changes(root):
+        return None
+    message = f"Memory extraction {job_id or 'manual'}: {reason}"
+    commit = run_git(root, "commit", "-m", message)
+    if commit.returncode != 0:
+        raise CliError(commit.stderr.strip() or "failed to commit memory changes")
+    rev = run_git(root, "rev-parse", "--short", "HEAD")
+    if rev.returncode != 0:
+        raise CliError(rev.stderr.strip() or "failed to read memory commit")
+    return rev.stdout.strip()
+
+
 def processed_ids(root: Path) -> set[str]:
     ids = set()
     for row in read_jsonl(root / "system" / "processed.jsonl"):
@@ -197,19 +254,29 @@ def processed_ids(root: Path) -> set[str]:
 
 
 class FileLock:
-    def __init__(self, path: Path):
+    def __init__(self, path: Path, *, blocking: bool = True):
         self.path = path
+        self.blocking = blocking
         self.handle: Optional[TextIO] = None
+        self.acquired = False
 
     def __enter__(self) -> "FileLock":
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.handle = self.path.open("w", encoding="utf-8")
-        fcntl.flock(self.handle.fileno(), fcntl.LOCK_EX)
+        flags = fcntl.LOCK_EX
+        if not self.blocking:
+            flags |= fcntl.LOCK_NB
+        try:
+            fcntl.flock(self.handle.fileno(), flags)
+            self.acquired = True
+        except BlockingIOError:
+            self.acquired = False
         return self
 
     def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
-        if self.handle:
+        if self.handle and self.acquired:
             fcntl.flock(self.handle.fileno(), fcntl.LOCK_UN)
+        if self.handle:
             self.handle.close()
 
 
@@ -865,32 +932,14 @@ def run_codex_extraction(
     return result
 
 
-def command_extract_run(args: argparse.Namespace) -> int:
-    root = memory_root()
-    ensure_base(root)
-    job_id = getattr(args, "job_id", None)
-    max_batch_chars = extract_max_batch_chars(args)
-    timeout_sec = extract_timeout_sec(args)
-    if job_id:
-        append_job_event(
-            root,
-            {
-                "job_id": job_id,
-                "status": "running",
-                "phase": "run_start",
-                "running_at": iso_now(),
-                "max_batch_chars": max_batch_chars,
-                "timeout_sec": timeout_sec,
-            },
-        )
-    if args.dry_run:
-        entries = select_entries_for_batch(pending_entries(root), args.limit, max_batch_chars)
-        if not entries:
-            print(json.dumps({"status": "no_pending_entries"}, ensure_ascii=False))
-            return 0
-        print(extraction_prompt(entries, root))
-        return 0
-
+def run_extraction_batches(
+    *,
+    root: Path,
+    args: argparse.Namespace,
+    job_id: Optional[str],
+    max_batch_chars: int,
+    timeout_sec: int,
+) -> Dict[str, int]:
     codex_cmd = args.codex_command or "codex"
     model = extract_model(args)
     effort = extract_effort(args)
@@ -954,8 +1003,8 @@ def command_extract_run(args: argparse.Namespace) -> int:
                         "finished_at": iso_now(),
                         "returncode": result,
                     },
-                )
-            return result
+            )
+            return {"returncode": result, "batch_count": processed_batches, "entry_count": processed_entries}
         processed_batches += 1
         processed_entries += len(entries)
         if remaining_limit is not None:
@@ -976,7 +1025,99 @@ def command_extract_run(args: argparse.Namespace) -> int:
         )
     if processed_entries == 0:
         print(json.dumps({"status": "no_pending_entries"}, ensure_ascii=False))
-    return 0
+    return {"returncode": 0, "batch_count": processed_batches, "entry_count": processed_entries}
+
+
+def command_extract_run(args: argparse.Namespace) -> int:
+    root = memory_root()
+    ensure_base(root)
+    job_id = getattr(args, "job_id", None)
+    max_batch_chars = extract_max_batch_chars(args)
+    timeout_sec = extract_timeout_sec(args)
+    if job_id:
+        append_job_event(
+            root,
+            {
+                "job_id": job_id,
+                "status": "running",
+                "phase": "run_start",
+                "running_at": iso_now(),
+                "max_batch_chars": max_batch_chars,
+                "timeout_sec": timeout_sec,
+            },
+        )
+    if args.dry_run:
+        entries = select_entries_for_batch(pending_entries(root), args.limit, max_batch_chars)
+        if not entries:
+            print(json.dumps({"status": "no_pending_entries"}, ensure_ascii=False))
+            return 0
+        print(extraction_prompt(entries, root))
+        return 0
+
+    commit_reason = "completed"
+    with FileLock(root / "system" / "locks" / "extract-job.lock", blocking=False) as job_lock:
+        if not job_lock.acquired:
+            if job_id:
+                append_job_event(
+                    root,
+                    {
+                        "job_id": job_id,
+                        "status": "skipped",
+                        "phase": "already_running",
+                        "finished_at": iso_now(),
+                        "returncode": 0,
+                        "message": "another_extraction_job_is_running",
+                    },
+                )
+            print(json.dumps({"status": "skipped", "reason": "another_extraction_job_is_running"}, ensure_ascii=False))
+            return 0
+        try:
+            result = run_extraction_batches(
+                root=root,
+                args=args,
+                job_id=job_id,
+                max_batch_chars=max_batch_chars,
+                timeout_sec=timeout_sec,
+            )
+            if result["returncode"] != 0:
+                commit_reason = "failed"
+            else:
+                commit_reason = "no_pending_entries" if result["entry_count"] == 0 else "completed"
+            return result["returncode"]
+        except Exception:
+            commit_reason = "failed"
+            raise
+        finally:
+            try:
+                if job_id:
+                    append_job_event(
+                        root,
+                        {
+                            "job_id": job_id,
+                            "status": "failed" if commit_reason == "failed" else "succeeded",
+                            "phase": "git_commit",
+                            "commit_reason": commit_reason,
+                            "returncode": 1 if commit_reason == "failed" else 0,
+                            "finished_at": iso_now(),
+                            "phase_at": iso_now(),
+                        },
+                    )
+                commit_memory_changes(root, job_id=job_id, reason=commit_reason)
+            except Exception as exc:
+                if job_id:
+                    append_job_event(
+                        root,
+                        {
+                            "job_id": job_id,
+                            "status": "failed",
+                            "phase": "git_commit_failed",
+                            "error_code": "git_commit_failed",
+                            "stderr_head": text_snippet(str(exc)),
+                            "finished_at": iso_now(),
+                            "returncode": 1,
+                        },
+                    )
+                raise
 
 
 def command_extract_start(args: argparse.Namespace) -> int:

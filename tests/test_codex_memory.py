@@ -1,4 +1,5 @@
 import json
+import fcntl
 import os
 import subprocess
 import sys
@@ -43,6 +44,15 @@ def run_bin(tmp_path, *args, input_text=None):
 
 def read_jsonl(path):
     return [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+
+
+def git(tmp_path, *args):
+    return subprocess.run(
+        ["git", "-C", str(tmp_path / "memory"), *args],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
 
 
 class CodexMemoryCliTests(unittest.TestCase):
@@ -92,6 +102,8 @@ class CodexMemoryCliTests(unittest.TestCase):
         self.assertEqual(entries[0]["text"], "记住我喜欢短回答")
         agents_text = (project / "AGENTS.md").read_text(encoding="utf-8")
         self.assertIn("codex-agent-memory workspace-key: example-repo", agents_text)
+        self.assertTrue((self.tmp_path / "memory" / ".git").exists())
+        self.assertIn("tmp/", (self.tmp_path / "memory" / ".gitignore").read_text(encoding="utf-8"))
 
     def test_workspace_key_reuses_project_agents_file(self):
         project = self.tmp_path / "Readable Project"
@@ -323,6 +335,47 @@ class CodexMemoryCliTests(unittest.TestCase):
         self.assertIn('model_reasoning_effort="medium"', argv)
         self.assertIn("--output-last-message", argv)
 
+    def test_extract_run_commits_memory_changes_to_git(self):
+        entry_id = json.loads(
+            run_cli(self.tmp_path, "inbox", "append", "--source", "user_prompt", input_text="记住我喜欢中文").stdout
+        )["id"]
+        fake_codex = self.tmp_path / "fake-codex.py"
+        fake_codex.write_text(
+            "#!/usr/bin/env python3\n"
+            "import json, pathlib, sys\n"
+            "out = pathlib.Path(sys.argv[sys.argv.index('--output-last-message') + 1])\n"
+            f"out.write_text(json.dumps({{'candidates': [], 'ignored': [{{'source_id': {entry_id!r}, 'reason': 'test'}}]}}), encoding='utf-8')\n",
+            encoding="utf-8",
+        )
+        fake_codex.chmod(0o755)
+
+        result = run_cli(self.tmp_path, "extract", "run", "--job-id", "job-git", "--codex-command", str(fake_codex))
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        log = git(self.tmp_path, "log", "--oneline", "-1")
+        self.assertEqual(log.returncode, 0, log.stderr)
+        self.assertIn("Memory extraction job-git: completed", log.stdout)
+        status = git(self.tmp_path, "status", "--porcelain")
+        self.assertEqual(status.returncode, 0, status.stderr)
+        self.assertEqual(status.stdout.strip(), "")
+
+    def test_extract_run_skips_when_job_lock_is_held(self):
+        run_cli(self.tmp_path, "inbox", "append", "--source", "user_prompt", input_text="one")
+        lock_path = self.tmp_path / "memory" / "system" / "locks" / "extract-job.lock"
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        with lock_path.open("w", encoding="utf-8") as handle:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+            result = run_cli(self.tmp_path, "extract", "run", "--job-id", "job-lock")
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("another_extraction_job_is_running", result.stdout)
+        rows = read_jsonl(self.tmp_path / "memory" / "system" / "extract-jobs.jsonl")
+        self.assertEqual(rows[-1]["status"], "skipped")
+        self.assertEqual(rows[-1]["phase"], "already_running")
+        pending = json.loads(run_cli(self.tmp_path, "inbox", "pending", "--json").stdout)
+        self.assertEqual(len(pending), 1)
+
     def test_extract_run_batches_entries_by_character_budget_without_splitting_entries(self):
         first = json.loads(run_cli(self.tmp_path, "inbox", "append", "--source", "user_prompt", input_text="a" * 80).stdout)["id"]
         second = json.loads(run_cli(self.tmp_path, "inbox", "append", "--source", "user_prompt", input_text="b" * 80).stdout)["id"]
@@ -404,12 +457,14 @@ class CodexMemoryCliTests(unittest.TestCase):
 
         self.assertNotEqual(result.returncode, 0)
         rows = read_jsonl(self.tmp_path / "memory" / "system" / "extract-jobs.jsonl")
-        failed = rows[-1]
+        failed = next(row for row in rows if row.get("phase") == "codex_failed")
         self.assertEqual(failed["status"], "failed")
         self.assertEqual(failed["stderr_chars"], 5000)
         self.assertLessEqual(len(failed["stderr_head"]), 1200)
         self.assertLessEqual(len(failed["stderr_tail"]), 1200)
         self.assertNotIn("error", failed)
+        self.assertEqual(rows[-1]["phase"], "git_commit")
+        self.assertEqual(rows[-1]["status"], "failed")
 
     def test_extract_start_records_default_model_and_effort(self):
         result = run_cli(self.tmp_path, "extract", "start", "--codex-command", "codex", "--limit", "1")
