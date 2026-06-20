@@ -20,8 +20,6 @@ CODEX_AGENT_MEMORY_ROOT=/path/to/memory
 
 ```text
 <memory-root>/
-  index.md
-
   inbox/
     user-prompts.jsonl
 

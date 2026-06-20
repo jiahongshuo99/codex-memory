@@ -72,6 +72,9 @@ class CodexMemoryCliTests(unittest.TestCase):
         payload = json.loads(result.stdout)
         self.assertTrue(payload["id"].startswith("up_"))
         self.assertIn("Memory root:", payload["protocol"])
+        self.assertNotIn("index.md", payload["protocol"])
+        self.assertIn("canonical/", payload["protocol"])
+        self.assertFalse((self.tmp_path / "memory" / "index.md").exists())
 
         inbox_file = self.tmp_path / "memory" / "inbox" / "user-prompts.jsonl"
         entries = read_jsonl(inbox_file)

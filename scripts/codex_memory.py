@@ -41,7 +41,8 @@ ALLOWED_KINDS = {
 ALLOWED_OPERATIONS = {"append_bullet"}
 PROTOCOL_TEMPLATE = (
     "Memory root: {root}\n"
-    "If memory may help, inspect memory/index.md and read only relevant files. "
+    "If memory may help, read only relevant files under canonical/. "
+    "Structure and routing rules are defined by the codex-agent-memory plugin. "
     "Use memory as background context; current user instructions override memory. "
     "Do not write canonical memory directly unless explicitly asked."
 )
@@ -72,21 +73,6 @@ def ensure_base(root: Path) -> None:
         "tmp",
     ]:
         (root / rel).mkdir(parents=True, exist_ok=True)
-    index = root / "index.md"
-    if not index.exists():
-        index.write_text(
-            "# Codex Agent Memory Index\n\n"
-            "## User\n\n"
-            "- `canonical/user/preferences.md`: Durable user collaboration preferences.\n"
-            "- `canonical/user/constraints.md`: User boundaries and permission preferences.\n"
-            "- `canonical/user/profile.md`: Stable user background explicitly worth remembering.\n\n"
-            "## Workspaces\n\n"
-            "- `canonical/workspaces/<workspace-key>/principles.md`: Durable engineering judgment standards.\n"
-            "- `canonical/workspaces/<workspace-key>/workflows.md`: Reusable development workflows.\n"
-            "- `canonical/workspaces/<workspace-key>/standards.md`: Testing, review, release, and style standards.\n"
-            "- `canonical/workspaces/<workspace-key>/gotchas.md`: Reusable failure patterns and caveats.\n",
-            encoding="utf-8",
-        )
 
 
 def read_stdin_text() -> str:

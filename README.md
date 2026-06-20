@@ -10,7 +10,6 @@ The full memory directory contract lives in [assets/memory-structure.md](assets/
 
 ```text
 ~/.codex/codex-agent-memory/
-  index.md
 
   inbox/user-prompts.jsonl
 
@@ -34,7 +33,7 @@ The full memory directory contract lives in [assets/memory-structure.md](assets/
 1. `UserPromptSubmit` hook calls the CLI.
 2. CLI appends the user prompt to JSONL inbox with a stable ID and metadata.
 3. Hook injects a short memory protocol on every user prompt.
-4. Codex decides whether to inspect `index.md` and relevant canonical memory.
+4. Codex decides whether to inspect relevant canonical memory.
 5. A manual or scheduled extraction command processes pending inbox entries.
 6. The CLI calls Codex CLI for semantic extraction, validates the returned plan, applies safe markdown bullets, and updates `processed.jsonl` plus `checkpoint.json`.
 

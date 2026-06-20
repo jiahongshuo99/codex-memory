@@ -34,7 +34,7 @@ Read memory only when it may help the current task:
 
 ## Read Flow
 
-1. Inspect `index.md` under the memory root.
+1. Use `assets/memory-structure.md` from this plugin to choose the relevant canonical module.
 2. Read only relevant files under `canonical/`.
 3. Treat memory as background context.
 4. Current user instructions always override stored memory.
