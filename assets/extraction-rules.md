@@ -11,6 +11,16 @@ Before choosing a `target_file`, follow `assets/memory-structure.md`. Canonical 
 - `canonical/workspaces/<workspace-key>/`
 - `canonical/domains/<domain-key>/`
 
+## Generalization Preference
+
+Before writing a candidate, decide whether the underlying idea is transferable beyond the current project.
+
+- If a design or implementation principle remains true outside the current workspace, generalize it and route it to `canonical/engineering/` or `canonical/domains/`.
+- Treat the current project as an example, not as part of the memory, unless the project context is required for correctness.
+- Avoid narrow wording such as "在 <workspace> 中", "针对这个项目", or "这个情况" unless the memory would be wrong without that scope.
+- For schema definitions, protocol contracts, configuration contracts, output formats, API contracts, and similar consistency concerns, prefer `canonical/engineering/standards.md`.
+- Do not write the same idea to both workspace and engineering memory by default. Choose the broadest accurate scope.
+
 ## User Memory
 
 Keep:

@@ -189,14 +189,14 @@ How the user wants to be served
 Cross-project engineering principle, workflow, standard, stack choice, or gotcha
   -> canonical/engineering/
 
-Only true for one concrete repo or workspace
+Depends on one concrete repo or workspace, such as local paths, commands, release flow, or stack details
   -> canonical/workspaces/<workspace-key>/
 
 Long-term domain knowledge that is not user-specific or workspace-specific
   -> canonical/domains/<domain-key>/
 ```
 
-If unsure whether a memory is workspace-specific or generally reusable, prefer the narrower workspace path unless the source explicitly frames it as a general rule.
+Before choosing `canonical/workspaces/<workspace-key>/`, test whether the idea remains true outside the current project. If it does, route it to the broadest accurate scope: `canonical/engineering/` for reusable engineering practice, or `canonical/domains/<domain-key>/` for subject-matter knowledge. Use workspace memory only when removing the workspace context would make the memory misleading.
 
 ## Canonical Entry Format
 

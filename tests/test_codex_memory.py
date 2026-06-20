@@ -211,6 +211,10 @@ class CodexMemoryCliTests(unittest.TestCase):
         self.assertIn("Codex Agent Memory Structure", result.stdout)
         self.assertIn("canonical/domains/<domain-key>/", result.stdout)
         self.assertIn("assets/extraction-output.schema.json", result.stdout)
+        self.assertIn("先提炼背后的长期原则", result.stdout)
+        self.assertIn("优先选择更通用且不失真的最宽作用域", result.stdout)
+        self.assertIn("schema definitions, protocol contracts, configuration contracts", result.stdout)
+        self.assertNotIn("prefer the narrower workspace path", result.stdout)
 
     def test_apply_plan_accepts_domain_memory_kind(self):
         plan = {
@@ -881,6 +885,56 @@ class CodexMemoryCliTests(unittest.TestCase):
         self.assertEqual(second.returncode, 0, second.stderr)
         lines = [line for line in target.read_text(encoding="utf-8").splitlines() if line.startswith("- ")]
         self.assertEqual(lines, ["- 用户偏好短回答，并希望回答直接给结论。"])
+
+    def test_apply_plan_general_memory_removes_similar_workspace_bullet(self):
+        workspace = self.tmp_path / "memory" / "canonical" / "workspaces" / "jian" / "standards.md"
+        workspace.parent.mkdir(parents=True, exist_ok=True)
+        workspace.write_text(
+            "# 标准\n\n"
+            "- 在 `jian` workspace 中，结构化输出 schema 应保持单一来源，避免后续迭代出现不一致。\n",
+            encoding="utf-8",
+        )
+        plan = {
+            "candidates": [
+                {
+                    "kind": "engineering_standard",
+                    "target_file": "canonical/engineering/standards.md",
+                    "content": "结构化输出 schema 应保持单一来源，避免后续迭代出现不一致。",
+                    "source_ids": ["up_general"],
+                }
+            ],
+            "ignored": [],
+        }
+
+        result = run_cli(self.tmp_path, "plan", "apply", "--stdin", input_text=json.dumps(plan))
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        engineering = self.tmp_path / "memory" / "canonical" / "engineering" / "standards.md"
+        self.assertIn("- 结构化输出 schema 应保持单一来源，避免后续迭代出现不一致。", engineering.read_text(encoding="utf-8"))
+        self.assertNotIn("结构化输出 schema", workspace.read_text(encoding="utf-8"))
+
+    def test_apply_plan_workspace_memory_does_not_remove_general_bullet(self):
+        engineering = self.tmp_path / "memory" / "canonical" / "engineering" / "standards.md"
+        engineering.parent.mkdir(parents=True, exist_ok=True)
+        engineering.write_text("# 标准\n\n- 结构化输出 schema 应保持单一来源。\n", encoding="utf-8")
+        plan = {
+            "candidates": [
+                {
+                    "kind": "workspace_standard",
+                    "target_file": "canonical/workspaces/jian/standards.md",
+                    "content": "在 `jian` workspace 中，结构化输出 schema 应保持单一来源。",
+                    "source_ids": ["up_workspace"],
+                }
+            ],
+            "ignored": [],
+        }
+
+        result = run_cli(self.tmp_path, "plan", "apply", "--stdin", input_text=json.dumps(plan))
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("- 结构化输出 schema 应保持单一来源。", engineering.read_text(encoding="utf-8"))
+        workspace = self.tmp_path / "memory" / "canonical" / "workspaces" / "jian" / "standards.md"
+        self.assertIn("- 在 `jian` workspace 中，结构化输出 schema 应保持单一来源。", workspace.read_text(encoding="utf-8"))
 
     def test_apply_plan_writes_extraction_log_per_source_id(self):
         plan = {

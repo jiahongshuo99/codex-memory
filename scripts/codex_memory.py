@@ -569,14 +569,67 @@ def normalized_memory(value: str) -> str:
     return re.sub(r"[\W_]+", "", value.lower())
 
 
+def descope_memory(value: str) -> str:
+    text = value.strip()
+    text = re.sub(
+        r"^在\s*`?[^`，,。]+`?\s*(workspace|项目|仓库|repo|repository|plugin|插件)[^，,。]*[，,]\s*",
+        "",
+        text,
+        flags=re.IGNORECASE,
+    )
+    text = re.sub(r"^(针对|对于)\s*(这个|该|当前)[^，,。]*[，,]\s*", "", text)
+    return text.strip()
+
+
 def is_similar_memory(existing: str, candidate: str) -> bool:
-    existing_norm = normalized_memory(existing)
-    candidate_norm = normalized_memory(candidate)
+    existing_norm = normalized_memory(descope_memory(existing))
+    candidate_norm = normalized_memory(descope_memory(candidate))
     if not existing_norm or not candidate_norm:
         return False
     if existing_norm in candidate_norm or candidate_norm in existing_norm:
         return True
     return difflib.SequenceMatcher(None, existing_norm, candidate_norm).ratio() >= 0.86
+
+
+def is_workspace_canonical_path(path: Path) -> bool:
+    parts = path.parts
+    return any(part == "canonical" and index + 1 < len(parts) and parts[index + 1] == "workspaces" for index, part in enumerate(parts))
+
+
+def remove_bullet_at(lines: List[str], index: int) -> List[str]:
+    start = index
+    end = index + 1
+    while end < len(lines) and lines[end].startswith("  "):
+        end += 1
+    if start > 0 and lines[start - 1] == "" and (end >= len(lines) or lines[end] == ""):
+        start -= 1
+    return lines[:start] + lines[end:]
+
+
+def remove_similar_workspace_bullets(root: Path, target_path: Path, content: str) -> bool:
+    if is_workspace_canonical_path(target_path):
+        return False
+    workspaces_root = root / "canonical" / "workspaces"
+    if not workspaces_root.exists():
+        return False
+    changed = False
+    for path in sorted(workspaces_root.rglob("*.md")):
+        if path.resolve() == target_path.resolve():
+            continue
+        lines = path.read_text(encoding="utf-8").splitlines()
+        index = 0
+        path_changed = False
+        while index < len(lines):
+            line = lines[index]
+            if line.startswith("- ") and is_similar_memory(line[2:].strip(), content):
+                lines = remove_bullet_at(lines, index)
+                path_changed = True
+                changed = True
+                continue
+            index += 1
+        if path_changed:
+            path.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
+    return changed
 
 
 def upsert_bullet(path: Path, content: str) -> bool:
@@ -675,6 +728,7 @@ def command_plan_apply(args: argparse.Namespace) -> int:
     processed_source_ids: List[str] = []
     for candidate in plan.get("candidates", []):
         path = validate_candidate(candidate, root)
+        removed_narrower = remove_similar_workspace_bullets(root, path, candidate["content"].strip())
         changed = upsert_bullet(path, candidate["content"].strip())
         for source_id in candidate["source_ids"]:
             processed_source_ids.append(source_id)
@@ -688,7 +742,7 @@ def command_plan_apply(args: argparse.Namespace) -> int:
                     "processed_at": iso_now(),
                 },
             )
-        if changed:
+        if changed or removed_narrower:
             applied.append(candidate)
     for item in plan.get("ignored", []):
         source_id = item.get("source_id")
@@ -718,6 +772,8 @@ def extraction_prompt(entries: List[Dict[str, Any]], root: Path) -> str:
         f"{structure}\n\n"
         f"{rules}\n\n"
         "所有写入 canonical/ 的记忆内容必须使用中文；如果原文是英文，也要提炼成自然中文。\n"
+        "不要机械复述当前场景；先提炼背后的长期原则。项目名、文件名、具体插件名只在必要时保留。\n"
+        "同一条信息不要同时写 workspace 和 engineering；优先选择更通用且不失真的最宽作用域。\n"
         "生成候选前必须先检查下面的现有 canonical 记忆；如果已有相同或相近内容，不要重复输出候选。"
         "只有确实有新增信息时，才输出可合并后的新候选内容。\n"
         "Return only JSON that conforms to assets/extraction-output.schema.json.\n"
