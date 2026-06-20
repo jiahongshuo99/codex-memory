@@ -79,10 +79,30 @@ class CodexMemoryCliTests(unittest.TestCase):
         self.assertEqual(entries[0]["id"], payload["id"])
         self.assertEqual(entries[0]["source"], "user_prompt")
         self.assertEqual(entries[0]["session_id"], "sess-1")
+        self.assertEqual(entries[0]["codex_session_id"], "sess-1")
         self.assertEqual(entries[0]["turn_id"], "turn-1")
         self.assertEqual(entries[0]["cwd"], "/tmp/example-repo")
         self.assertEqual(entries[0]["workspace_key"], "example-repo")
         self.assertEqual(entries[0]["text"], "记住我喜欢短回答")
+
+    def test_inbox_append_accepts_explicit_codex_session_id(self):
+        result = run_cli(
+            self.tmp_path,
+            "inbox",
+            "append",
+            "--source",
+            "user_prompt",
+            "--session-id",
+            "local-session",
+            "--codex-session-id",
+            "codex-session-123",
+            input_text="hello",
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        entries = read_jsonl(self.tmp_path / "memory" / "inbox" / "user-prompts.jsonl")
+        self.assertEqual(entries[0]["session_id"], "local-session")
+        self.assertEqual(entries[0]["codex_session_id"], "codex-session-123")
 
     def test_pending_entries_are_idempotent_against_processed_log(self):
         first = run_cli(self.tmp_path, "inbox", "append", "--source", "user_prompt", input_text="one")
@@ -345,6 +365,51 @@ class CodexMemoryCliTests(unittest.TestCase):
         checkpoint = json.loads((self.tmp_path / "memory" / "system" / "checkpoint.json").read_text())
         self.assertEqual(checkpoint["last_processed_id"], "up_20260620_2")
         self.assertEqual(checkpoint["processed_count"], 2)
+
+    def test_apply_plan_writes_extraction_log_per_source_id(self):
+        plan = {
+            "candidates": [
+                {
+                    "kind": "user_preference",
+                    "target_file": "canonical/user/preferences.md",
+                    "operation": "append_bullet",
+                    "content": "用户偏好短回答。",
+                    "source_ids": ["up_1"],
+                    "confidence": "high",
+                    "reason": "explicit",
+                },
+                {
+                    "kind": "engineering_principle",
+                    "target_file": "canonical/engineering/principles.md",
+                    "operation": "append_bullet",
+                    "content": "CLI 负责可靠性。",
+                    "source_ids": ["up_1", "up_2"],
+                    "confidence": "high",
+                    "reason": "explicit",
+                },
+            ],
+            "ignored": [
+                {
+                    "source_id": "up_3",
+                    "reason": "too specific",
+                }
+            ],
+        }
+
+        result = run_cli(self.tmp_path, "plan", "apply", "--stdin", input_text=json.dumps(plan))
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        rows = read_jsonl(self.tmp_path / "memory" / "system" / "extraction-log.jsonl")
+        by_id = {row["source_id"]: row for row in rows}
+        self.assertEqual(by_id["up_1"]["memory_count"], 2)
+        self.assertEqual(by_id["up_2"]["memory_count"], 1)
+        self.assertEqual(by_id["up_3"]["memory_count"], 0)
+        self.assertEqual(by_id["up_3"]["status"], "ignored")
+        self.assertEqual(by_id["up_1"]["target_files"], ["canonical/engineering/principles.md", "canonical/user/preferences.md"])
+
+        log_result = run_cli(self.tmp_path, "extract", "log", "--json")
+        self.assertEqual(log_result.returncode, 0, log_result.stderr)
+        self.assertEqual(len(json.loads(log_result.stdout)), 3)
 
 
 if __name__ == "__main__":

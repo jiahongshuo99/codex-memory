@@ -162,6 +162,7 @@ def command_inbox_append(args: argparse.Namespace) -> int:
         "ts": timestamp,
         "source": args.source,
         "session_id": args.session_id,
+        "codex_session_id": args.codex_session_id or args.session_id,
         "turn_id": args.turn_id,
         "cwd": args.cwd,
         "workspace_key": args.workspace_key or workspace_key(args.cwd),
@@ -219,6 +220,18 @@ def command_extract_claim(args: argparse.Namespace) -> int:
     root = memory_root()
     ensure_base(root)
     print(json.dumps(claim_entries(root, args.limit), ensure_ascii=False))
+    return 0
+
+
+def command_extract_log(args: argparse.Namespace) -> int:
+    root = memory_root()
+    ensure_base(root)
+    rows = read_jsonl(root / "system" / "extraction-log.jsonl")
+    if args.json:
+        print(json.dumps(rows, ensure_ascii=False))
+    else:
+        for row in rows:
+            print(f"{row.get('source_id')} {row.get('status')} memories={row.get('memory_count')}")
     return 0
 
 
@@ -286,6 +299,43 @@ def write_checkpoint(root: Path, processed_source_ids: List[str]) -> None:
     checkpoint_path.write_text(json.dumps(checkpoint, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 
+def write_extraction_log(root: Path, plan: Dict[str, Any]) -> None:
+    summaries: Dict[str, Dict[str, Any]] = {}
+    logged_at = iso_now()
+    for candidate in plan.get("candidates", []):
+        for source_id in candidate.get("source_ids", []):
+            summary = summaries.setdefault(
+                source_id,
+                {
+                    "source_id": source_id,
+                    "status": "processed",
+                    "memory_count": 0,
+                    "candidate_kinds": set(),
+                    "target_files": set(),
+                    "logged_at": logged_at,
+                },
+            )
+            summary["memory_count"] += 1
+            summary["candidate_kinds"].add(candidate.get("kind"))
+            summary["target_files"].add(candidate.get("target_file"))
+    for item in plan.get("ignored", []):
+        source_id = item.get("source_id")
+        if source_id and source_id not in summaries:
+            summaries[source_id] = {
+                "source_id": source_id,
+                "status": "ignored",
+                "memory_count": 0,
+                "candidate_kinds": set(),
+                "target_files": set(),
+                "reason": item.get("reason", ""),
+                "logged_at": logged_at,
+            }
+    for summary in summaries.values():
+        summary["candidate_kinds"] = sorted(value for value in summary["candidate_kinds"] if value)
+        summary["target_files"] = sorted(value for value in summary["target_files"] if value)
+        append_jsonl(root / "system" / "extraction-log.jsonl", summary)
+
+
 def command_plan_apply(args: argparse.Namespace) -> int:
     root = memory_root()
     ensure_base(root)
@@ -329,6 +379,7 @@ def command_plan_apply(args: argparse.Namespace) -> int:
                 },
             )
             ignored.append(item)
+    write_extraction_log(root, plan)
     write_checkpoint(root, processed_source_ids)
     print(json.dumps({"applied": len(applied), "ignored": len(ignored)}, ensure_ascii=False))
     return 0
@@ -414,6 +465,7 @@ def build_parser() -> argparse.ArgumentParser:
     append = inbox_sub.add_parser("append")
     append.add_argument("--source", default="user_prompt")
     append.add_argument("--session-id")
+    append.add_argument("--codex-session-id")
     append.add_argument("--turn-id")
     append.add_argument("--cwd")
     append.add_argument("--workspace-key")
@@ -438,6 +490,9 @@ def build_parser() -> argparse.ArgumentParser:
     claim = extract_sub.add_parser("claim")
     claim.add_argument("--limit", type=int)
     claim.set_defaults(func=command_extract_claim)
+    log = extract_sub.add_parser("log")
+    log.add_argument("--json", action="store_true")
+    log.set_defaults(func=command_extract_log)
     run = extract_sub.add_parser("run")
     run.add_argument("--dry-run", action="store_true")
     run.add_argument("--limit", type=int)

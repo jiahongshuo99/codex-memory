@@ -57,6 +57,7 @@ CODEX_AGENT_MEMORY_ROOT=/path/to/memory
   system/
     checkpoint.json
     processed.jsonl
+    extraction-log.jsonl
     extraction-rules.md
     locks/
 
@@ -75,6 +76,15 @@ inbox/user-prompts.jsonl
 
 Each line is a JSON object with an `id`, timestamp, session metadata, workspace hint, and raw prompt text. Treat inbox as append-only.
 
+Important fields:
+
+- `id`: stable raw content ID used by processing logs.
+- `session_id`: local session identifier passed by the hook or caller.
+- `codex_session_id`: Codex conversation/session identifier. Use this to connect raw memory entries back to richer Codex session context later.
+- `turn_id`: Codex turn identifier when available.
+- `workspace_key`: workspace slug hint derived from `cwd` or passed explicitly.
+- `text`: raw user prompt text.
+
 ### `canonical/`
 
 Durable memory that agents may read during normal work. Keep entries concise, stable, and reusable.
@@ -86,6 +96,12 @@ Do not store raw conversation transcripts, one-off cases, or assistant messages 
 Machine state for the memory system: checkpoint, processed log, extraction rules, and locks. This is not semantic memory.
 
 Agents should not use `system/` as ordinary task context unless debugging the memory system itself.
+
+- `processed.jsonl`: idempotency and claim state for inbox entries.
+- `extraction-log.jsonl`: append-only extraction audit log. One record per raw content ID per extraction application, including `source_id`, status, and how many canonical memories were extracted.
+- `checkpoint.json`: summary progress marker.
+- `extraction-rules.md`: local override for extraction rules.
+- `locks/`: filesystem locks.
 
 ### `tmp/`
 

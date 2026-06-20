@@ -22,6 +22,7 @@ The full memory directory contract lives in [assets/memory-structure.md](assets/
 
   system/checkpoint.json
   system/processed.jsonl
+  system/extraction-log.jsonl
   system/extraction-rules.md
   system/locks/
 
@@ -120,6 +121,14 @@ codex-memory extract claim --limit 20
 ```
 
 `extract run` uses the same claim path internally before it calls Codex CLI.
+
+Read the extraction audit log:
+
+```bash
+codex-memory extract log --json
+```
+
+The log lives at `system/extraction-log.jsonl`. It records one row per raw source id for each applied extraction plan, including how many canonical memories were extracted from that raw content.
 
 ## Memory Root
 

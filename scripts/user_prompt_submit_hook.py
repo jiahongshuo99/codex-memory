@@ -25,6 +25,7 @@ def main() -> int:
     ]
     if payload.get("session_id"):
         cmd.extend(["--session-id", payload["session_id"]])
+        cmd.extend(["--codex-session-id", payload["session_id"]])
     if payload.get("turn_id"):
         cmd.extend(["--turn-id", payload["turn_id"]])
     if payload.get("cwd"):
