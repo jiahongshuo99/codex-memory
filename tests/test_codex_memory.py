@@ -321,6 +321,94 @@ class CodexMemoryCliTests(unittest.TestCase):
         self.assertIn('model_reasoning_effort="medium"', argv)
         self.assertIn("--output-last-message", argv)
 
+    def test_extract_run_batches_entries_by_character_budget_without_splitting_entries(self):
+        first = json.loads(run_cli(self.tmp_path, "inbox", "append", "--source", "user_prompt", input_text="a" * 80).stdout)["id"]
+        second = json.loads(run_cli(self.tmp_path, "inbox", "append", "--source", "user_prompt", input_text="b" * 80).stdout)["id"]
+        fake_codex = self.tmp_path / "fake-codex.py"
+        calls_path = self.tmp_path / "calls.jsonl"
+        fake_codex.write_text(
+            "#!/usr/bin/env python3\n"
+            "import json, pathlib, re, sys\n"
+            "prompt = sys.stdin.read()\n"
+            f"calls = pathlib.Path({str(calls_path)!r})\n"
+            "calls.write_text(calls.read_text(encoding='utf-8') + json.dumps({'chars': len(prompt), 'ids': re.findall(r'up_[A-Za-z0-9T+_:-]+', prompt)}) + '\\n' if calls.exists() else json.dumps({'chars': len(prompt), 'ids': re.findall(r'up_[A-Za-z0-9T+_:-]+', prompt)}) + '\\n', encoding='utf-8')\n"
+            "ids = sorted(set(re.findall(r'up_[A-Za-z0-9T+_:-]+', prompt)))\n"
+            "out = pathlib.Path(sys.argv[sys.argv.index('--output-last-message') + 1])\n"
+            "out.write_text(json.dumps({'candidates': [], 'ignored': [{'source_id': i, 'reason': 'test'} for i in ids]}), encoding='utf-8')\n",
+            encoding="utf-8",
+        )
+        fake_codex.chmod(0o755)
+
+        result = run_cli(
+            self.tmp_path,
+            "extract",
+            "run",
+            "--codex-command",
+            str(fake_codex),
+            "--max-batch-chars",
+            "400",
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        calls = read_jsonl(calls_path)
+        self.assertEqual(len(calls), 2)
+        self.assertEqual([{first}, {second}], [set(call["ids"]) for call in calls])
+
+    def test_extract_run_marks_single_oversized_entry_failed_without_splitting(self):
+        entry_id = json.loads(
+            run_cli(self.tmp_path, "inbox", "append", "--source", "user_prompt", input_text="x" * 500).stdout
+        )["id"]
+        fake_codex = self.tmp_path / "fake-codex.py"
+        fake_codex.write_text("#!/usr/bin/env python3\nraise SystemExit(99)\n", encoding="utf-8")
+        fake_codex.chmod(0o755)
+
+        result = run_cli(
+            self.tmp_path,
+            "extract",
+            "run",
+            "--codex-command",
+            str(fake_codex),
+            "--max-batch-chars",
+            "200",
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        processed = read_jsonl(self.tmp_path / "memory" / "system" / "processed.jsonl")
+        self.assertEqual(processed[-1]["id"], entry_id)
+        self.assertEqual(processed[-1]["status"], "failed")
+        self.assertEqual(processed[-1]["reason"], "entry_exceeds_max_batch_chars")
+
+    def test_extract_failure_job_log_stores_error_summary_not_full_stderr(self):
+        run_cli(self.tmp_path, "inbox", "append", "--source", "user_prompt", input_text="记住测试失败摘要")
+        fake_codex = self.tmp_path / "fake-codex.py"
+        fake_codex.write_text(
+            "#!/usr/bin/env python3\n"
+            "import sys\n"
+            "sys.stderr.write('A' * 5000)\n"
+            "raise SystemExit(2)\n",
+            encoding="utf-8",
+        )
+        fake_codex.chmod(0o755)
+
+        result = run_cli(
+            self.tmp_path,
+            "extract",
+            "run",
+            "--job-id",
+            "job-test",
+            "--codex-command",
+            str(fake_codex),
+        )
+
+        self.assertNotEqual(result.returncode, 0)
+        rows = read_jsonl(self.tmp_path / "memory" / "system" / "extract-jobs.jsonl")
+        failed = rows[-1]
+        self.assertEqual(failed["status"], "failed")
+        self.assertEqual(failed["stderr_chars"], 5000)
+        self.assertLessEqual(len(failed["stderr_head"]), 1200)
+        self.assertLessEqual(len(failed["stderr_tail"]), 1200)
+        self.assertNotIn("error", failed)
+
     def test_extract_start_records_default_model_and_effort(self):
         result = run_cli(self.tmp_path, "extract", "start", "--codex-command", "codex", "--limit", "1")
 
@@ -330,6 +418,9 @@ class CodexMemoryCliTests(unittest.TestCase):
         self.assertEqual(payload["command"][payload["command"].index("--model") + 1], "gpt-5.4")
         self.assertIn("--effort", payload["command"])
         self.assertEqual(payload["command"][payload["command"].index("--effort") + 1], "medium")
+        self.assertIn("--max-batch-chars", payload["command"])
+        self.assertEqual(payload["command"][payload["command"].index("--max-batch-chars") + 1], "100000")
+        self.assertIn("--timeout-sec", payload["command"])
 
     def test_hooks_do_not_write_flow_log_when_debug_is_disabled(self):
         memory_root = self.tmp_path / "memory"
@@ -403,6 +494,35 @@ class CodexMemoryCliTests(unittest.TestCase):
         self.assertEqual(rows[1]["status"], "skipped")
         self.assertEqual(rows[1]["action"], "extract_start")
         self.assertFalse(rows[1]["extract_on_stop"])
+
+    def test_user_prompt_hook_filters_memory_hook_injected_prompt(self):
+        memory_root = self.tmp_path / "memory"
+        env = {
+            **os.environ,
+            "CODEX_AGENT_MEMORY_ROOT": str(memory_root),
+            "CODEX_AGENT_MEMORY_DEBUG": "1",
+        }
+        prompt = (
+            "<hook_prompt hook_run_id=\"stop:1:/tmp/hooks.json\">"
+            "# Codex Agent Memory Structure\nExisting canonical memory:\nInbox entries:\n"
+            "Return only JSON with top-level keys `candidates` and `ignored`."
+            "</hook_prompt>"
+        )
+
+        result = subprocess.run(
+            [sys.executable, str(USER_PROMPT_HOOK)],
+            input=json.dumps({"prompt": prompt, "session_id": "sess-1", "turn_id": "turn-1", "cwd": "/tmp/example-repo"}),
+            text=True,
+            capture_output=True,
+            env=env,
+            check=False,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse((memory_root / "inbox" / "user-prompts.jsonl").exists())
+        rows = read_jsonl(memory_root / "system" / "hook-flow.jsonl")
+        self.assertEqual(rows[0]["status"], "filtered")
+        self.assertEqual(rows[0]["filter_reason"], "hook_prompt_injection")
 
     def test_bin_launcher_invokes_cli_without_installing(self):
         result = run_bin(

@@ -105,6 +105,11 @@ Run extraction through Codex CLI synchronously:
 codex-memory extract run --limit 20
 ```
 
+`extract run` processes claimed inbox entries in batches. Each Codex extraction call defaults to at most
+100,000 characters of inbox entry JSON; if pending content exceeds that budget, the run continues in
+additional batches. A single entry is never split or truncated. If one entry alone exceeds the batch
+budget, it is marked `failed` with reason `entry_exceeds_max_batch_chars`.
+
 Start extraction asynchronously and return immediately:
 
 ```bash
@@ -118,6 +123,10 @@ codex-memory extract jobs --json
 ```
 
 Job state is recorded in `system/extract-jobs.jsonl`. Background job stdout/stderr logs are stored under `system/extract-jobs/`.
+Job events include phase-level records such as `batch_claimed`, `codex_start`, `codex_finished`,
+`plan_apply_start`, and `batch_done` to make slow or timed-out extraction runs diagnosable. Failed
+job records store summarized fields such as `error_code`, `stderr_head`, `stderr_tail`, and character
+counts instead of embedding full prompts or full stderr in `extract-jobs.jsonl`.
 
 The extraction command shells out to:
 
@@ -133,6 +142,8 @@ codex exec \
 
 The default extraction model is `gpt-5.4` with `medium` reasoning effort. Override with
 `--model`, `--effort`, `CODEX_AGENT_MEMORY_EXTRACT_MODEL`, or `CODEX_AGENT_MEMORY_EXTRACT_EFFORT`.
+The default timeout for one Codex extraction call is 900 seconds; override with `--timeout-sec` or
+`CODEX_AGENT_MEMORY_EXTRACT_TIMEOUT_SEC`.
 Use `--codex-command /path/to/codex` if `codex` is not on PATH.
 
 Claim a batch without extracting:
@@ -142,6 +153,9 @@ codex-memory extract claim --limit 20
 ```
 
 `extract run` uses the same claim path internally before it calls Codex CLI.
+Claimed entries first receive `processing`. Normal terminal states are `processed` or `ignored`;
+extraction failures and oversize entries are marked `failed` so they do not remain stuck in
+`processing`.
 
 Read the extraction audit log:
 

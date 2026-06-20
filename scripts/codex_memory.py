@@ -14,6 +14,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, TextIO
 
@@ -23,6 +24,9 @@ INBOX_FILE = "user-prompts.jsonl"
 EXTRACT_JOBS_FILE = "extract-jobs.jsonl"
 DEFAULT_EXTRACT_MODEL = "gpt-5.4"
 DEFAULT_EXTRACT_EFFORT = "medium"
+DEFAULT_EXTRACT_MAX_BATCH_CHARS = 100_000
+DEFAULT_EXTRACT_TIMEOUT_SEC = 900
+LOG_SNIPPET_CHARS = 1200
 ALLOWED_KINDS = {
     "user_preference",
     "user_constraint",
@@ -142,6 +146,47 @@ def read_jsonl(path: Path) -> List[Dict[str, Any]]:
     return rows
 
 
+def text_snippet(text: Optional[str], *, limit: int = LOG_SNIPPET_CHARS) -> Optional[str]:
+    if not text:
+        return None
+    stripped = text.strip()
+    if len(stripped) <= limit:
+        return stripped
+    return stripped[:limit]
+
+
+def text_tail(text: Optional[str], *, limit: int = LOG_SNIPPET_CHARS) -> Optional[str]:
+    if not text:
+        return None
+    stripped = text.strip()
+    if len(stripped) <= limit:
+        return stripped
+    return stripped[-limit:]
+
+
+def error_code_from_text(text: str) -> str:
+    lowered = text.lower()
+    if "input exceeds the maximum length" in lowered or "input_too_large" in lowered:
+        return "input_too_large"
+    if "timed out" in lowered or "timeout" in lowered:
+        return "timeout"
+    if "json" in lowered:
+        return "invalid_json"
+    return "codex_failed"
+
+
+def error_event(error_code: str, stderr: Optional[str] = None, stdout: Optional[str] = None) -> Dict[str, Any]:
+    return {
+        "error_code": error_code,
+        "stderr_chars": len(stderr or ""),
+        "stdout_chars": len(stdout or ""),
+        "stderr_head": text_snippet(stderr),
+        "stderr_tail": text_tail(stderr),
+        "stdout_head": text_snippet(stdout),
+        "stdout_tail": text_tail(stdout),
+    }
+
+
 def processed_ids(root: Path) -> set[str]:
     ids = set()
     for row in read_jsonl(root / "system" / "processed.jsonl"):
@@ -209,16 +254,61 @@ def command_inbox_pending(args: argparse.Namespace) -> int:
 
 
 def make_batch_id() -> str:
-    timestamp = iso_now().replace("-", "").replace(":", "").replace("+00:00", "Z")
+    timestamp = iso_now().replace("-", "").replace(":", "").replace("+08:00", "+0800")
     digest = hashlib.sha256(os.urandom(32)).hexdigest()[:8]
     return f"batch_{timestamp}_{digest}"
 
 
-def claim_entries(root: Path, limit: Optional[int]) -> Dict[str, Any]:
+def entry_size(entry: Dict[str, Any]) -> int:
+    return len(json.dumps(entry, ensure_ascii=False))
+
+
+def mark_entries_failed(root: Path, entries: Iterable[Dict[str, Any]], reason: str, *, job_id: Optional[str] = None) -> None:
+    failed_at = iso_now()
+    for entry in entries:
+        if not entry.get("id"):
+            continue
+        payload = {
+            "id": entry["id"],
+            "status": "failed",
+            "reason": reason,
+            "failed_at": failed_at,
+        }
+        if job_id:
+            payload["job_id"] = job_id
+        append_jsonl(root / "system" / "processed.jsonl", payload)
+
+
+def claim_entries(root: Path, limit: Optional[int], max_batch_chars: Optional[int] = None) -> Dict[str, Any]:
     with FileLock(root / "system" / "locks" / "extract-claim.lock"):
-        entries = pending_entries(root)
-        if limit:
-            entries = entries[:limit]
+        pending = pending_entries(root)
+        entries: List[Dict[str, Any]] = []
+        oversized: List[Dict[str, Any]] = []
+        total_chars = 0
+        for entry in pending:
+            if limit and len(entries) >= limit:
+                break
+            size = entry_size(entry)
+            if max_batch_chars and size > max_batch_chars:
+                if entries:
+                    break
+                oversized.append(entry)
+                append_jsonl(
+                    root / "system" / "processed.jsonl",
+                    {
+                        "id": entry["id"],
+                        "status": "failed",
+                        "reason": "entry_exceeds_max_batch_chars",
+                        "failed_at": iso_now(),
+                        "entry_chars": size,
+                        "max_batch_chars": max_batch_chars,
+                    },
+                )
+                continue
+            if max_batch_chars and entries and total_chars + size > max_batch_chars:
+                break
+            entries.append(entry)
+            total_chars += size
         batch_id = make_batch_id()
         claimed_at = iso_now()
         for entry in entries:
@@ -231,13 +321,37 @@ def claim_entries(root: Path, limit: Optional[int]) -> Dict[str, Any]:
                     "claimed_at": claimed_at,
                 },
             )
-        return {"batch_id": batch_id, "entries": entries}
+        return {
+            "batch_id": batch_id,
+            "entries": entries,
+            "entry_count": len(entries),
+            "entry_chars": total_chars,
+            "oversized": oversized,
+        }
+
+
+def select_entries_for_batch(entries: List[Dict[str, Any]], limit: Optional[int], max_batch_chars: int) -> List[Dict[str, Any]]:
+    selected: List[Dict[str, Any]] = []
+    total_chars = 0
+    for entry in entries:
+        if limit and len(selected) >= limit:
+            break
+        size = entry_size(entry)
+        if size > max_batch_chars:
+            if selected:
+                break
+            continue
+        if selected and total_chars + size > max_batch_chars:
+            break
+        selected.append(entry)
+        total_chars += size
+    return selected
 
 
 def command_extract_claim(args: argparse.Namespace) -> int:
     root = memory_root()
     ensure_base(root)
-    print(json.dumps(claim_entries(root, args.limit), ensure_ascii=False))
+    print(json.dumps(claim_entries(root, args.limit, args.max_batch_chars), ensure_ascii=False))
     return 0
 
 
@@ -541,113 +655,324 @@ def extract_effort(args: argparse.Namespace) -> str:
     return args.effort or os.environ.get("CODEX_AGENT_MEMORY_EXTRACT_EFFORT") or DEFAULT_EXTRACT_EFFORT
 
 
-def command_extract_run(args: argparse.Namespace) -> int:
-    root = memory_root()
-    ensure_base(root)
-    job_id = getattr(args, "job_id", None)
-    if job_id:
-        append_job_event(root, {"job_id": job_id, "status": "running", "running_at": iso_now()})
-    if args.dry_run:
-        entries = pending_entries(root)
-        if args.limit:
-            entries = entries[: args.limit]
-    else:
-        claim = claim_entries(root, args.limit)
-        entries = claim["entries"]
-    if not entries:
-        if job_id:
-            append_job_event(
-                root,
-                {
-                    "job_id": job_id,
-                    "status": "succeeded",
-                    "finished_at": iso_now(),
-                    "returncode": 0,
-                    "message": "no_pending_entries",
-                },
-            )
-        print(json.dumps({"status": "no_pending_entries"}, ensure_ascii=False))
-        return 0
+def extract_max_batch_chars(args: argparse.Namespace) -> int:
+    configured = args.max_batch_chars or os.environ.get("CODEX_AGENT_MEMORY_EXTRACT_MAX_BATCH_CHARS")
+    return int(configured or DEFAULT_EXTRACT_MAX_BATCH_CHARS)
+
+
+def extract_timeout_sec(args: argparse.Namespace) -> int:
+    configured = args.timeout_sec or os.environ.get("CODEX_AGENT_MEMORY_EXTRACT_TIMEOUT_SEC")
+    return int(configured or DEFAULT_EXTRACT_TIMEOUT_SEC)
+
+
+def run_codex_extraction(
+    *,
+    root: Path,
+    job_id: Optional[str],
+    batch_index: int,
+    batch_id: str,
+    entries: List[Dict[str, Any]],
+    codex_cmd: str,
+    model: str,
+    effort: str,
+    timeout_sec: int,
+) -> int:
     prompt = extraction_prompt(entries, root)
-    if args.dry_run:
-        print(prompt)
-        return 0
-    codex_cmd = args.codex_command or "codex"
-    model = extract_model(args)
-    effort = extract_effort(args)
     with tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=".md", delete=False) as fh:
         fh.write(prompt)
         prompt_path = fh.name
     output_path = tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=".json", delete=False)
     output_path.close()
+    command = [
+        codex_cmd,
+        "exec",
+        "--dangerously-bypass-approvals-and-sandbox",
+        "--skip-git-repo-check",
+        "--model",
+        model,
+        "-c",
+        f'model_reasoning_effort="{effort}"',
+        "--output-last-message",
+        output_path.name,
+        "-",
+    ]
+    if job_id:
+        append_job_event(
+            root,
+            {
+                "job_id": job_id,
+                "status": "running",
+                "phase": "codex_start",
+                "batch_index": batch_index,
+                "batch_id": batch_id,
+                "entry_count": len(entries),
+                "entry_ids": [entry.get("id") for entry in entries],
+                "prompt_chars": len(prompt),
+                "model": model,
+                "effort": effort,
+                "timeout_sec": timeout_sec,
+                "phase_at": iso_now(),
+            },
+        )
+    started = time.monotonic()
     try:
         run = subprocess.run(
-            [
-                codex_cmd,
-                "exec",
-                "--dangerously-bypass-approvals-and-sandbox",
-                "--skip-git-repo-check",
-                "--model",
-                model,
-                "-c",
-                f'model_reasoning_effort="{effort}"',
-                "--output-last-message",
-                output_path.name,
-                "-",
-            ],
+            command,
             input=prompt,
             text=True,
             capture_output=True,
             check=False,
+            timeout=timeout_sec,
         )
+    except subprocess.TimeoutExpired as exc:
+        stderr = exc.stderr if isinstance(exc.stderr, str) else (exc.stderr or b"").decode("utf-8", "replace")
+        stdout = exc.stdout if isinstance(exc.stdout, str) else (exc.stdout or b"").decode("utf-8", "replace")
+        mark_entries_failed(root, entries, "codex_timeout", job_id=job_id)
+        if job_id:
+            append_job_event(
+                root,
+                {
+                    "job_id": job_id,
+                    "status": "failed",
+                    "phase": "codex_timeout",
+                    "batch_index": batch_index,
+                    "batch_id": batch_id,
+                    "finished_at": iso_now(),
+                    "duration_ms": round((time.monotonic() - started) * 1000),
+                    "returncode": None,
+                    **error_event("timeout", stderr, stdout),
+                },
+            )
+        raise CliError(f"Codex extraction timed out after {timeout_sec}s")
     finally:
         Path(prompt_path).unlink(missing_ok=True)
     if run.returncode != 0:
         Path(output_path.name).unlink(missing_ok=True)
+        stderr = run.stderr.strip()
+        stdout = run.stdout.strip()
+        code = error_code_from_text(stderr or stdout)
+        mark_entries_failed(root, entries, code, job_id=job_id)
         if job_id:
             append_job_event(
                 root,
                 {
                     "job_id": job_id,
                     "status": "failed",
+                    "phase": "codex_failed",
+                    "batch_index": batch_index,
+                    "batch_id": batch_id,
                     "finished_at": iso_now(),
+                    "duration_ms": round((time.monotonic() - started) * 1000),
                     "returncode": run.returncode,
-                    "error": run.stderr.strip() or "codex extraction command failed",
+                    **error_event(code, stderr, stdout),
                 },
             )
-        raise CliError(run.stderr.strip() or "codex extraction command failed")
+        raise CliError(f"Codex extraction failed: {code}")
     try:
         final_output = Path(output_path.name).read_text(encoding="utf-8").strip()
+        if job_id:
+            append_job_event(
+                root,
+                {
+                    "job_id": job_id,
+                    "status": "running",
+                    "phase": "codex_finished",
+                    "batch_index": batch_index,
+                    "batch_id": batch_id,
+                    "duration_ms": round((time.monotonic() - started) * 1000),
+                    "stdout_chars": len(run.stdout or ""),
+                    "stderr_chars": len(run.stderr or ""),
+                    "final_output_chars": len(final_output),
+                    "phase_at": iso_now(),
+                },
+            )
         plan = json.loads(final_output)
     except json.JSONDecodeError as exc:
+        mark_entries_failed(root, entries, "invalid_json", job_id=job_id)
         if job_id:
             append_job_event(
                 root,
                 {
                     "job_id": job_id,
                     "status": "failed",
+                    "phase": "invalid_json",
+                    "batch_index": batch_index,
+                    "batch_id": batch_id,
                     "finished_at": iso_now(),
                     "returncode": 1,
-                    "error": f"Codex CLI did not return JSON: {exc}",
+                    "error_code": "invalid_json",
+                    "json_error": str(exc),
+                    "final_output_chars": len(final_output if "final_output" in locals() else ""),
+                    "final_output_head": text_snippet(final_output if "final_output" in locals() else ""),
+                    "final_output_tail": text_tail(final_output if "final_output" in locals() else ""),
                 },
             )
         raise CliError(f"Codex CLI did not return JSON: {exc}") from exc
     finally:
         Path(output_path.name).unlink(missing_ok=True)
+    covered_ids = {
+        source_id
+        for candidate in plan.get("candidates", [])
+        for source_id in candidate.get("source_ids", [])
+    }
+    covered_ids.update(item.get("source_id") for item in plan.get("ignored", []) if item.get("source_id"))
+    missing_ids = [entry["id"] for entry in entries if entry.get("id") not in covered_ids]
+    if missing_ids:
+        ignored = plan.setdefault("ignored", [])
+        for source_id in missing_ids:
+            ignored.append(
+                {
+                    "source_id": source_id,
+                    "reason": "提取结果未覆盖该条已认领内容，自动标记为 ignored，避免长期停留在 processing 状态。",
+                }
+            )
     raw = json.dumps(plan, ensure_ascii=False)
     sys.stdin = _StringStdin(raw)
+    if job_id:
+        append_job_event(
+            root,
+            {
+                "job_id": job_id,
+                "status": "running",
+                "phase": "plan_apply_start",
+                "batch_index": batch_index,
+                "batch_id": batch_id,
+                "candidate_count": len(plan.get("candidates", [])),
+                "ignored_count": len(plan.get("ignored", [])),
+                "phase_at": iso_now(),
+            },
+        )
     result = command_plan_apply(argparse.Namespace(stdin=True, file=None))
     if job_id:
         append_job_event(
             root,
             {
                 "job_id": job_id,
-                "status": "succeeded" if result == 0 else "failed",
-                "finished_at": iso_now(),
+                "status": "running" if result == 0 else "failed",
+                "phase": "batch_done" if result == 0 else "plan_apply_failed",
+                "batch_index": batch_index,
+                "batch_id": batch_id,
+                "phase_at": iso_now(),
                 "returncode": result,
             },
         )
+    if result != 0:
+        mark_entries_failed(root, entries, "plan_apply_failed", job_id=job_id)
     return result
+
+
+def command_extract_run(args: argparse.Namespace) -> int:
+    root = memory_root()
+    ensure_base(root)
+    job_id = getattr(args, "job_id", None)
+    max_batch_chars = extract_max_batch_chars(args)
+    timeout_sec = extract_timeout_sec(args)
+    if job_id:
+        append_job_event(
+            root,
+            {
+                "job_id": job_id,
+                "status": "running",
+                "phase": "run_start",
+                "running_at": iso_now(),
+                "max_batch_chars": max_batch_chars,
+                "timeout_sec": timeout_sec,
+            },
+        )
+    if args.dry_run:
+        entries = select_entries_for_batch(pending_entries(root), args.limit, max_batch_chars)
+        if not entries:
+            print(json.dumps({"status": "no_pending_entries"}, ensure_ascii=False))
+            return 0
+        print(extraction_prompt(entries, root))
+        return 0
+
+    codex_cmd = args.codex_command or "codex"
+    model = extract_model(args)
+    effort = extract_effort(args)
+    processed_batches = 0
+    processed_entries = 0
+    remaining_limit = args.limit
+
+    while remaining_limit is None or remaining_limit > 0:
+        claim = claim_entries(root, remaining_limit, max_batch_chars)
+        entries = claim["entries"]
+        oversized = claim.get("oversized", [])
+        if job_id and oversized:
+            append_job_event(
+                root,
+                {
+                    "job_id": job_id,
+                    "status": "running",
+                    "phase": "oversized_entries_failed",
+                    "entry_ids": [entry.get("id") for entry in oversized],
+                    "entry_chars": [entry_size(entry) for entry in oversized],
+                    "max_batch_chars": max_batch_chars,
+                    "phase_at": iso_now(),
+                },
+            )
+        if not entries:
+            break
+        batch_index = processed_batches + 1
+        if job_id:
+            append_job_event(
+                root,
+                {
+                    "job_id": job_id,
+                    "status": "running",
+                    "phase": "batch_claimed",
+                    "batch_index": batch_index,
+                    "batch_id": claim["batch_id"],
+                    "entry_count": len(entries),
+                    "entry_chars": claim.get("entry_chars"),
+                    "entry_ids": [entry.get("id") for entry in entries],
+                    "phase_at": iso_now(),
+                },
+            )
+        result = run_codex_extraction(
+            root=root,
+            job_id=job_id,
+            batch_index=batch_index,
+            batch_id=claim["batch_id"],
+            entries=entries,
+            codex_cmd=codex_cmd,
+            model=model,
+            effort=effort,
+            timeout_sec=timeout_sec,
+        )
+        if result != 0:
+            if job_id:
+                append_job_event(
+                    root,
+                    {
+                        "job_id": job_id,
+                        "status": "failed",
+                        "finished_at": iso_now(),
+                        "returncode": result,
+                    },
+                )
+            return result
+        processed_batches += 1
+        processed_entries += len(entries)
+        if remaining_limit is not None:
+            remaining_limit -= len(entries)
+
+    if job_id:
+        append_job_event(
+            root,
+            {
+                "job_id": job_id,
+                "status": "succeeded",
+                "finished_at": iso_now(),
+                "returncode": 0,
+                "batch_count": processed_batches,
+                "entry_count": processed_entries,
+                "message": "no_pending_entries" if processed_entries == 0 else "completed",
+            },
+        )
+    if processed_entries == 0:
+        print(json.dumps({"status": "no_pending_entries"}, ensure_ascii=False))
+    return 0
 
 
 def command_extract_start(args: argparse.Namespace) -> int:
@@ -660,6 +985,8 @@ def command_extract_start(args: argparse.Namespace) -> int:
     stderr_path = log_dir / f"{job_id}.stderr.log"
     model = extract_model(args)
     effort = extract_effort(args)
+    max_batch_chars = extract_max_batch_chars(args)
+    timeout_sec = extract_timeout_sec(args)
     cmd = [
         sys.executable,
         str(Path(__file__).resolve()),
@@ -671,6 +998,10 @@ def command_extract_start(args: argparse.Namespace) -> int:
         model,
         "--effort",
         effort,
+        "--max-batch-chars",
+        str(max_batch_chars),
+        "--timeout-sec",
+        str(timeout_sec),
     ]
     if args.limit:
         cmd.extend(["--limit", str(args.limit)])
@@ -744,6 +1075,7 @@ def build_parser() -> argparse.ArgumentParser:
     extract_sub = extract.add_subparsers(dest="extract_command", required=True)
     claim = extract_sub.add_parser("claim")
     claim.add_argument("--limit", type=int)
+    claim.add_argument("--max-batch-chars", type=int)
     claim.set_defaults(func=command_extract_claim)
     log = extract_sub.add_parser("log")
     log.add_argument("--json", action="store_true")
@@ -754,6 +1086,8 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--codex-command")
     run.add_argument("--model")
     run.add_argument("--effort")
+    run.add_argument("--max-batch-chars", type=int)
+    run.add_argument("--timeout-sec", type=int)
     run.add_argument("--job-id")
     run.set_defaults(func=command_extract_run)
     start = extract_sub.add_parser("start")
@@ -761,6 +1095,8 @@ def build_parser() -> argparse.ArgumentParser:
     start.add_argument("--codex-command")
     start.add_argument("--model")
     start.add_argument("--effort")
+    start.add_argument("--max-batch-chars", type=int)
+    start.add_argument("--timeout-sec", type=int)
     start.set_defaults(func=command_extract_start)
     jobs = extract_sub.add_parser("jobs")
     jobs.add_argument("--json", action="store_true")
