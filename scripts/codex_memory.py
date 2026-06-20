@@ -21,6 +21,8 @@ from typing import Any, Dict, Iterable, List, Optional, TextIO
 DEFAULT_ROOT = Path.home() / ".codex" / "codex-agent-memory"
 INBOX_FILE = "user-prompts.jsonl"
 EXTRACT_JOBS_FILE = "extract-jobs.jsonl"
+DEFAULT_EXTRACT_MODEL = "gpt-5.4"
+DEFAULT_EXTRACT_EFFORT = "medium"
 ALLOWED_KINDS = {
     "user_preference",
     "user_constraint",
@@ -61,12 +63,15 @@ def memory_root() -> Path:
     return Path(os.environ.get("CODEX_AGENT_MEMORY_ROOT", DEFAULT_ROOT)).expanduser()
 
 
-def utc_now() -> dt.datetime:
-    return dt.datetime.now(dt.timezone.utc)
+BEIJING_TZ = dt.timezone(dt.timedelta(hours=8))
+
+
+def local_now() -> dt.datetime:
+    return dt.datetime.now(BEIJING_TZ)
 
 
 def iso_now() -> str:
-    return utc_now().isoformat(timespec="seconds")
+    return local_now().isoformat(timespec="seconds")
 
 
 def ensure_base(root: Path) -> None:
@@ -115,7 +120,7 @@ def workspace_key(cwd: Optional[str]) -> Optional[str]:
 
 def make_id(source: str, text: str, timestamp: str, session_id: Optional[str], turn_id: Optional[str]) -> str:
     prefix = "up" if source == "user_prompt" else "ev"
-    compact_ts = timestamp.replace("-", "").replace(":", "").replace("+00:00", "Z")
+    compact_ts = timestamp.replace("-", "").replace(":", "").replace("+08:00", "+0800")
     digest = hashlib.sha256(f"{source}\0{timestamp}\0{session_id}\0{turn_id}\0{text}".encode("utf-8")).hexdigest()[:8]
     return f"{prefix}_{compact_ts}_{digest}"
 
@@ -528,6 +533,14 @@ def read_plugin_asset(name: str) -> str:
     return ""
 
 
+def extract_model(args: argparse.Namespace) -> str:
+    return args.model or os.environ.get("CODEX_AGENT_MEMORY_EXTRACT_MODEL") or DEFAULT_EXTRACT_MODEL
+
+
+def extract_effort(args: argparse.Namespace) -> str:
+    return args.effort or os.environ.get("CODEX_AGENT_MEMORY_EXTRACT_EFFORT") or DEFAULT_EXTRACT_EFFORT
+
+
 def command_extract_run(args: argparse.Namespace) -> int:
     root = memory_root()
     ensure_base(root)
@@ -560,12 +573,28 @@ def command_extract_run(args: argparse.Namespace) -> int:
         print(prompt)
         return 0
     codex_cmd = args.codex_command or "codex"
+    model = extract_model(args)
+    effort = extract_effort(args)
     with tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=".md", delete=False) as fh:
         fh.write(prompt)
         prompt_path = fh.name
+    output_path = tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=".json", delete=False)
+    output_path.close()
     try:
         run = subprocess.run(
-            [codex_cmd, "exec", "--full-auto", "--skip-git-repo-check", "-"],
+            [
+                codex_cmd,
+                "exec",
+                "--dangerously-bypass-approvals-and-sandbox",
+                "--skip-git-repo-check",
+                "--model",
+                model,
+                "-c",
+                f'model_reasoning_effort="{effort}"',
+                "--output-last-message",
+                output_path.name,
+                "-",
+            ],
             input=prompt,
             text=True,
             capture_output=True,
@@ -574,6 +603,7 @@ def command_extract_run(args: argparse.Namespace) -> int:
     finally:
         Path(prompt_path).unlink(missing_ok=True)
     if run.returncode != 0:
+        Path(output_path.name).unlink(missing_ok=True)
         if job_id:
             append_job_event(
                 root,
@@ -587,7 +617,8 @@ def command_extract_run(args: argparse.Namespace) -> int:
             )
         raise CliError(run.stderr.strip() or "codex extraction command failed")
     try:
-        plan = json.loads(run.stdout)
+        final_output = Path(output_path.name).read_text(encoding="utf-8").strip()
+        plan = json.loads(final_output)
     except json.JSONDecodeError as exc:
         if job_id:
             append_job_event(
@@ -601,6 +632,8 @@ def command_extract_run(args: argparse.Namespace) -> int:
                 },
             )
         raise CliError(f"Codex CLI did not return JSON: {exc}") from exc
+    finally:
+        Path(output_path.name).unlink(missing_ok=True)
     raw = json.dumps(plan, ensure_ascii=False)
     sys.stdin = _StringStdin(raw)
     result = command_plan_apply(argparse.Namespace(stdin=True, file=None))
@@ -625,7 +658,20 @@ def command_extract_start(args: argparse.Namespace) -> int:
     log_dir.mkdir(parents=True, exist_ok=True)
     stdout_path = log_dir / f"{job_id}.stdout.log"
     stderr_path = log_dir / f"{job_id}.stderr.log"
-    cmd = [sys.executable, str(Path(__file__).resolve()), "extract", "run", "--job-id", job_id]
+    model = extract_model(args)
+    effort = extract_effort(args)
+    cmd = [
+        sys.executable,
+        str(Path(__file__).resolve()),
+        "extract",
+        "run",
+        "--job-id",
+        job_id,
+        "--model",
+        model,
+        "--effort",
+        effort,
+    ]
     if args.limit:
         cmd.extend(["--limit", str(args.limit)])
     if args.codex_command:
@@ -706,11 +752,15 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--dry-run", action="store_true")
     run.add_argument("--limit", type=int)
     run.add_argument("--codex-command")
+    run.add_argument("--model")
+    run.add_argument("--effort")
     run.add_argument("--job-id")
     run.set_defaults(func=command_extract_run)
     start = extract_sub.add_parser("start")
     start.add_argument("--limit", type=int)
     start.add_argument("--codex-command")
+    start.add_argument("--model")
+    start.add_argument("--effort")
     start.set_defaults(func=command_extract_start)
     jobs = extract_sub.add_parser("jobs")
     jobs.add_argument("--json", action="store_true")

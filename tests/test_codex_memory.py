@@ -288,6 +288,49 @@ class CodexMemoryCliTests(unittest.TestCase):
         self.assertEqual(by_id["job-2"]["status"], "started")
         self.assertEqual(by_id["job-3"]["status"], "failed")
 
+    def test_extract_run_uses_configured_model_effort_and_last_message_output(self):
+        run_cli(self.tmp_path, "inbox", "append", "--source", "user_prompt", input_text="记住我喜欢中文")
+        fake_codex = self.tmp_path / "fake-codex.py"
+        argv_path = self.tmp_path / "fake-codex-argv.json"
+        fake_codex.write_text(
+            "#!/usr/bin/env python3\n"
+            "import json, pathlib, sys\n"
+            f"pathlib.Path({str(argv_path)!r}).write_text(json.dumps(sys.argv, ensure_ascii=False), encoding='utf-8')\n"
+            "out = pathlib.Path(sys.argv[sys.argv.index('--output-last-message') + 1])\n"
+            "out.write_text(json.dumps({'candidates': [], 'ignored': []}), encoding='utf-8')\n",
+            encoding="utf-8",
+        )
+        fake_codex.chmod(0o755)
+
+        result = run_cli(
+            self.tmp_path,
+            "extract",
+            "run",
+            "--codex-command",
+            str(fake_codex),
+            "--model",
+            "gpt-5.4",
+            "--effort",
+            "medium",
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        argv = json.loads(argv_path.read_text(encoding="utf-8"))
+        self.assertIn("--model", argv)
+        self.assertEqual(argv[argv.index("--model") + 1], "gpt-5.4")
+        self.assertIn('model_reasoning_effort="medium"', argv)
+        self.assertIn("--output-last-message", argv)
+
+    def test_extract_start_records_default_model_and_effort(self):
+        result = run_cli(self.tmp_path, "extract", "start", "--codex-command", "codex", "--limit", "1")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        payload = json.loads(result.stdout)
+        self.assertIn("--model", payload["command"])
+        self.assertEqual(payload["command"][payload["command"].index("--model") + 1], "gpt-5.4")
+        self.assertIn("--effort", payload["command"])
+        self.assertEqual(payload["command"][payload["command"].index("--effort") + 1], "medium")
+
     def test_hooks_do_not_write_flow_log_when_debug_is_disabled(self):
         memory_root = self.tmp_path / "memory"
         env = {**os.environ, "CODEX_AGENT_MEMORY_ROOT": str(memory_root)}

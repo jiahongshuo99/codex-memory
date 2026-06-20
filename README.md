@@ -122,9 +122,17 @@ Job state is recorded in `system/extract-jobs.jsonl`. Background job stdout/stde
 The extraction command shells out to:
 
 ```bash
-codex exec --full-auto --skip-git-repo-check -
+codex exec \
+  --dangerously-bypass-approvals-and-sandbox \
+  --skip-git-repo-check \
+  --model gpt-5.4 \
+  -c 'model_reasoning_effort="medium"' \
+  --output-last-message <tmp-output.json> \
+  -
 ```
 
+The default extraction model is `gpt-5.4` with `medium` reasoning effort. Override with
+`--model`, `--effort`, `CODEX_AGENT_MEMORY_EXTRACT_MODEL`, or `CODEX_AGENT_MEMORY_EXTRACT_EFFORT`.
 Use `--codex-command /path/to/codex` if `codex` is not on PATH.
 
 Claim a batch without extracting:
