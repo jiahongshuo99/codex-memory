@@ -20,7 +20,6 @@ from typing import Any, Dict, Iterable, List, Optional, TextIO
 
 
 DEFAULT_ROOT = Path.home() / ".codex" / "codex-agent-memory"
-INBOX_FILE = "user-prompts.jsonl"
 EXTRACT_JOBS_FILE = "extract-jobs.jsonl"
 DEFAULT_EXTRACT_MODEL = "gpt-5.4"
 DEFAULT_EXTRACT_EFFORT = "medium"
@@ -60,7 +59,7 @@ def iso_now() -> str:
 
 def ensure_base(root: Path) -> None:
     for rel in [
-        "inbox",
+        "inbox/events",
         "canonical/user",
         "canonical/workspaces",
         "system/locks",
@@ -103,11 +102,17 @@ def workspace_key(cwd: Optional[str]) -> Optional[str]:
     return key
 
 
-def make_id(source: str, text: str, timestamp: str, session_id: Optional[str], turn_id: Optional[str]) -> str:
-    prefix = "up" if source == "user_prompt" else "ev"
+def make_id(event_type: str, text: str, timestamp: str, session_id: Optional[str], turn_id: Optional[str]) -> str:
+    prefixes = {"user_prompt": "up", "assistant_message": "am"}
+    prefix = prefixes.get(event_type, "ev")
     compact_ts = timestamp.replace("-", "").replace(":", "").replace("+08:00", "+0800")
-    digest = hashlib.sha256(f"{source}\0{timestamp}\0{session_id}\0{turn_id}\0{text}".encode("utf-8")).hexdigest()[:8]
+    digest = hashlib.sha256(f"{event_type}\0{timestamp}\0{session_id}\0{turn_id}\0{text}".encode("utf-8")).hexdigest()[:8]
     return f"{prefix}_{compact_ts}_{digest}"
+
+
+def inbox_event_path(root: Path, timestamp: str) -> Path:
+    day = timestamp.split("T", 1)[0] if "T" in timestamp else iso_now().split("T", 1)[0]
+    return root / "inbox" / "events" / f"{day}.jsonl"
 
 
 def append_jsonl(path: Path, obj: Dict[str, Any]) -> None:
@@ -183,7 +188,8 @@ MEMORY_GITIGNORE = """\
 !/canonical/
 !/canonical/**
 !/inbox/
-!/inbox/user-prompts.jsonl
+!/inbox/events/
+!/inbox/events/**
 !/system/
 !/system/checkpoint.json
 !/system/extract-jobs.jsonl
@@ -298,11 +304,11 @@ def command_inbox_append(args: argparse.Namespace) -> int:
     if not text:
         raise CliError("inbox append requires prompt text on stdin or --text")
     timestamp = args.timestamp or iso_now()
-    entry_id = args.id or make_id(args.source, text, timestamp, args.session_id, args.turn_id)
+    entry_id = args.id or make_id(args.type, text, timestamp, args.session_id, args.turn_id)
     entry = {
         "id": entry_id,
         "ts": timestamp,
-        "source": args.source,
+        "type": args.type,
         "session_id": args.session_id,
         "codex_session_id": args.codex_session_id or args.session_id,
         "turn_id": args.turn_id,
@@ -310,14 +316,150 @@ def command_inbox_append(args: argparse.Namespace) -> int:
         "workspace_key": args.workspace_key or workspace_key(args.cwd),
         "text": text,
     }
-    append_jsonl(root / "inbox" / INBOX_FILE, entry)
+    if getattr(args, "phase", None):
+        entry["phase"] = args.phase
+    append_jsonl(inbox_event_path(root, timestamp), entry)
     print(json.dumps({"id": entry_id, "protocol": PROTOCOL_TEMPLATE.format(root=root)}, ensure_ascii=False))
     return 0
 
 
+def inbox_event_files(root: Path) -> List[Path]:
+    events_root = root / "inbox" / "events"
+    if not events_root.exists():
+        return []
+    return sorted(events_root.glob("*.jsonl"))
+
+
 def pending_entries(root: Path) -> List[Dict[str, Any]]:
     done = processed_ids(root)
-    return [row for row in read_jsonl(root / "inbox" / INBOX_FILE) if row.get("id") not in done]
+    entries: List[Dict[str, Any]] = []
+    for path in inbox_event_files(root):
+        entries.extend(read_jsonl(path))
+    entries = [row for row in entries if row.get("id") not in done]
+    entries.sort(key=lambda row: row.get("ts") or "")
+    return entries
+
+
+def codex_home() -> Path:
+    return Path(os.environ.get("CODEX_HOME", Path.home() / ".codex")).expanduser()
+
+
+def parse_codex_timestamp(value: Optional[str]) -> str:
+    if not value:
+        return iso_now()
+    try:
+        normalized = value.replace("Z", "+00:00")
+        return dt.datetime.fromisoformat(normalized).astimezone(BEIJING_TZ).isoformat(timespec="seconds")
+    except ValueError:
+        return iso_now()
+
+
+def existing_inbox_ids(root: Path) -> set[str]:
+    ids: set[str] = set()
+    for path in inbox_event_files(root):
+        for row in read_jsonl(path):
+            if row.get("id"):
+                ids.add(row["id"])
+    return ids
+
+
+def iter_session_files(sessions_root: Path, session_id: Optional[str]) -> Iterable[Path]:
+    if not sessions_root.exists():
+        return []
+    files = sorted(sessions_root.rglob("*.jsonl"), key=lambda path: path.stat().st_mtime, reverse=True)
+    if session_id:
+        files = [path for path in files if session_id in path.name or session_id in str(path)]
+    return files
+
+
+def collect_assistant_final_answers(
+    *,
+    root: Path,
+    sessions_root: Path,
+    turn_id: Optional[str],
+    session_id: Optional[str],
+    cwd: Optional[str],
+) -> Dict[str, Any]:
+    ensure_base(root)
+    seen_ids = existing_inbox_ids(root)
+    collected: List[str] = []
+    scanned_files = 0
+    matched_files = 0
+    for path in iter_session_files(sessions_root, session_id):
+        scanned_files += 1
+        current_turn_id: Optional[str] = None
+        current_cwd: Optional[str] = cwd
+        codex_session_id: Optional[str] = session_id
+        try:
+            with path.open("r", encoding="utf-8") as fh:
+                for line in fh:
+                    if not line.strip():
+                        continue
+                    row = json.loads(line)
+                    payload = row.get("payload") or {}
+                    row_type = row.get("type")
+                    if row_type == "session_meta":
+                        codex_session_id = codex_session_id or payload.get("id")
+                        current_cwd = current_cwd or payload.get("cwd")
+                        continue
+                    if row_type == "turn_context":
+                        current_turn_id = payload.get("turn_id") or current_turn_id
+                        current_cwd = current_cwd or payload.get("cwd")
+                        continue
+                    if row_type != "event_msg":
+                        continue
+                    event_type = payload.get("type")
+                    if event_type == "task_started":
+                        current_turn_id = payload.get("turn_id") or current_turn_id
+                        continue
+                    if event_type != "agent_message" or payload.get("phase") != "final_answer":
+                        continue
+                    if turn_id and current_turn_id != turn_id:
+                        continue
+                    text = (payload.get("message") or "").strip()
+                    if not text:
+                        continue
+                    timestamp = parse_codex_timestamp(row.get("timestamp"))
+                    entry_id = make_id("assistant_message", text, timestamp, codex_session_id, current_turn_id)
+                    if entry_id in seen_ids:
+                        continue
+                    entry = {
+                        "id": entry_id,
+                        "ts": timestamp,
+                        "type": "assistant_message",
+                        "phase": "final_answer",
+                        "session_id": codex_session_id,
+                        "codex_session_id": codex_session_id,
+                        "turn_id": current_turn_id,
+                        "cwd": current_cwd,
+                        "workspace_key": workspace_key(current_cwd),
+                        "text": text,
+                    }
+                    append_jsonl(inbox_event_path(root, timestamp), entry)
+                    seen_ids.add(entry_id)
+                    collected.append(entry_id)
+                    matched_files += 1
+                    if turn_id:
+                        break
+        except (json.JSONDecodeError, OSError):
+            continue
+        if turn_id and collected:
+            break
+    return {"collected": len(collected), "ids": collected, "scanned_files": scanned_files, "matched_files": matched_files}
+
+
+def command_inbox_collect_assistant_final(args: argparse.Namespace) -> int:
+    root = memory_root()
+    sessions_root = Path(args.sessions_root).expanduser() if args.sessions_root else codex_home() / "sessions"
+    payload = collect_assistant_final_answers(
+        root=root,
+        sessions_root=sessions_root,
+        turn_id=args.turn_id,
+        session_id=args.session_id,
+        cwd=args.cwd,
+    )
+    print(json.dumps(payload, ensure_ascii=False))
+    return 0
 
 
 def command_inbox_pending(args: argparse.Namespace) -> int:
@@ -774,6 +916,8 @@ def extraction_prompt(entries: List[Dict[str, Any]], root: Path) -> str:
         "所有写入 canonical/ 的记忆内容必须使用中文；如果原文是英文，也要提炼成自然中文。\n"
         "不要机械复述当前场景；先提炼背后的长期原则。项目名、文件名、具体插件名只在必要时保留。\n"
         "同一条信息不要同时写 workspace 和 engineering；优先选择更通用且不失真的最宽作用域。\n"
+        "对于 type=assistant_message 且 phase=final_answer 的内容，只提取确定性结论、已完成动作、已验证结果或明确接受的决策；"
+        "不要把方案设计建议、备选方案、推测或未被用户确认的建议写入 canonical。\n"
         "生成候选前必须先检查下面的现有 canonical 记忆；如果已有相同或相近内容，不要重复输出候选。"
         "只有确实有新增信息时，才输出可合并后的新候选内容。\n"
         "Return only JSON that conforms to assets/extraction-output.schema.json.\n"
@@ -1306,17 +1450,24 @@ def build_parser() -> argparse.ArgumentParser:
     inbox = sub.add_parser("inbox")
     inbox_sub = inbox.add_subparsers(dest="inbox_command", required=True)
     append = inbox_sub.add_parser("append")
-    append.add_argument("--source", default="user_prompt")
+    append.add_argument("--type", default="user_prompt")
     append.add_argument("--session-id")
     append.add_argument("--codex-session-id")
     append.add_argument("--turn-id")
     append.add_argument("--cwd")
     append.add_argument("--workspace-key")
+    append.add_argument("--phase")
     append.add_argument("--timestamp")
     append.add_argument("--id")
     append.add_argument("--text")
     append.add_argument("--text-stdin", action="store_true")
     append.set_defaults(func=command_inbox_append)
+    collect_final = inbox_sub.add_parser("collect-assistant-final")
+    collect_final.add_argument("--turn-id")
+    collect_final.add_argument("--session-id")
+    collect_final.add_argument("--cwd")
+    collect_final.add_argument("--sessions-root")
+    collect_final.set_defaults(func=command_inbox_collect_assistant_final)
     pending = inbox_sub.add_parser("pending")
     pending.add_argument("--json", action="store_true")
     pending.set_defaults(func=command_inbox_pending)

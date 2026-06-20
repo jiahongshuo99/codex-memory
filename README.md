@@ -11,7 +11,7 @@ The full memory directory contract lives in [assets/memory-structure.md](assets/
 ```text
 ~/.codex/codex-agent-memory/
 
-  inbox/user-prompts.jsonl
+  inbox/events/YYYY-MM-DD.jsonl
 
   canonical/
     user/
@@ -34,13 +34,13 @@ The memory root is initialized as a Git repository automatically. Transient file
 ## Flow
 
 1. `UserPromptSubmit` hook calls the CLI.
-2. CLI appends the user prompt to JSONL inbox with a stable ID and metadata.
+2. CLI appends the user prompt to the daily JSONL inbox event stream with a stable ID and metadata.
 3. Hook injects a short memory protocol on every user prompt.
 4. Codex decides whether to inspect relevant canonical memory.
 5. A manual, scheduled, or Stop-hook-started background extraction command processes pending inbox entries.
 6. The CLI calls Codex CLI for semantic extraction, validates the returned plan, applies safe markdown bullets, and updates `processed.jsonl` plus `checkpoint.json`.
 
-Optional extraction can also be started from the Codex `Stop` hook. It is disabled by default and must be enabled with an environment variable. When enabled, the hook starts a background extraction job and returns immediately.
+The Codex `Stop` hook records assistant `final_answer` events into the same daily inbox event stream. Optional extraction can also be started from the `Stop` hook. It is disabled by default and must be enabled with an environment variable. When enabled, the hook starts a background extraction job and returns immediately.
 
 ## CLI
 
@@ -81,7 +81,7 @@ Use `--copy` if you want a copied launcher instead of a symlink. The copied laun
 Append a prompt:
 
 ```bash
-codex-memory inbox append --source user_prompt --text-stdin
+codex-memory inbox append --type user_prompt --text-stdin
 ```
 
 List unprocessed inbox entries:

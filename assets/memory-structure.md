@@ -21,7 +21,8 @@ CODEX_AGENT_MEMORY_ROOT=/path/to/memory
 ```text
 <memory-root>/
   inbox/
-    user-prompts.jsonl
+    events/
+      YYYY-MM-DD.jsonl
 
   canonical/
     user/
@@ -66,28 +67,32 @@ CODEX_AGENT_MEMORY_ROOT=/path/to/memory
 
 ### `inbox/`
 
-Raw event stream. For now, the plugin records user prompts only:
+Raw event stream. The plugin records user prompts and assistant final answers in daily JSONL files:
 
 ```text
-inbox/user-prompts.jsonl
+inbox/events/YYYY-MM-DD.jsonl
 ```
 
-Each line is a JSON object with an `id`, timestamp, session metadata, workspace hint, and raw prompt text. Treat inbox as append-only.
+Each line is a JSON object with an `id`, timestamp, type, optional phase, session metadata, workspace hint, and raw text. Treat inbox as append-only.
 
 Important fields:
 
 - `id`: stable raw content ID used by processing logs.
+- `type`: event type, such as `user_prompt` or `assistant_message`.
 - `session_id`: local session identifier passed by the hook or caller.
 - `codex_session_id`: Codex conversation/session identifier. Use this to connect raw memory entries back to richer Codex session context later.
 - `turn_id`: Codex turn identifier when available.
 - `workspace_key`: workspace slug hint derived from `cwd` or passed explicitly.
 - `text`: raw user prompt text.
+- `phase`: assistant message phase when `type` is `assistant_message`; only `final_answer` is collected.
+
+Assistant final answers are lower authority than user prompts. They may help extract confirmed outcomes, but they must not be treated as user preferences or accepted decisions unless the surrounding user prompt or final answer makes that explicit.
 
 ### `canonical/`
 
 Durable memory that agents may read during normal work. Keep entries concise, stable, and reusable.
 
-Do not store raw conversation transcripts, one-off cases, or assistant messages in canonical memory.
+Do not store raw conversation transcripts, one-off cases, or raw assistant messages in canonical memory.
 
 ### `system/`
 

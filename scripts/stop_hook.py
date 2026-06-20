@@ -36,6 +36,7 @@ def cli_command() -> str:
 def main() -> int:
     started = time.monotonic()
     payload = json.loads(sys.stdin.read() or "{}")
+    script_dir = Path(__file__).resolve().parent
     log_record = {
         "hook": "Stop",
         "script": str(Path(__file__).resolve()),
@@ -49,6 +50,19 @@ def main() -> int:
         log_record["duration_ms"] = round((time.monotonic() - started) * 1000)
         write_flow_log(log_record)
         return 0
+
+    collect_cmd = [sys.executable, str(script_dir / "codex_memory.py"), "inbox", "collect-assistant-final"]
+    if payload.get("turn_id"):
+        collect_cmd.extend(["--turn-id", payload["turn_id"]])
+    if payload.get("session_id"):
+        collect_cmd.extend(["--session-id", payload["session_id"]])
+    if payload.get("cwd"):
+        collect_cmd.extend(["--cwd", payload["cwd"]])
+    collect_result = subprocess.run(collect_cmd, text=True, capture_output=True, check=False)
+    log_record["assistant_collect_command"] = collect_cmd
+    log_record["assistant_collect_returncode"] = collect_result.returncode
+    log_record["assistant_collect_stdout"] = text_snippet(collect_result.stdout)
+    log_record["assistant_collect_stderr"] = text_snippet(collect_result.stderr)
 
     if not enabled():
         log_record["status"] = "skipped"

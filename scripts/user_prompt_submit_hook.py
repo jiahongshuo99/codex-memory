@@ -69,7 +69,7 @@ def main() -> int:
         str(cli),
         "inbox",
         "append",
-        "--source",
+        "--type",
         "user_prompt",
         "--text-stdin",
     ]

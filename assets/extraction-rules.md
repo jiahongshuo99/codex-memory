@@ -21,6 +21,26 @@ Before writing a candidate, decide whether the underlying idea is transferable b
 - For schema definitions, protocol contracts, configuration contracts, output formats, API contracts, and similar consistency concerns, prefer `canonical/engineering/standards.md`.
 - Do not write the same idea to both workspace and engineering memory by default. Choose the broadest accurate scope.
 
+## Assistant Message Memory
+
+When `type` is `assistant_message` and `phase` is `final_answer`, treat the entry as lower authority than a user prompt.
+
+Keep only:
+
+- Confirmed conclusions.
+- Completed actions and verified results.
+- Accepted decisions that are explicitly stated as accepted or already applied.
+- Stable facts about the current system that the assistant actually verified.
+
+Do not keep:
+
+- Proposed plans, possible designs, implementation suggestions, or alternatives.
+- Speculation, caveats, or recommendations that the user has not accepted.
+- Assistant-inferred user preferences.
+- Mere summaries of what the assistant intends to do next.
+
+If an assistant final answer mixes completed facts with suggestions, extract only the completed facts. If no durable confirmed conclusion remains, ignore the entry.
+
 ## User Memory
 
 Keep:

@@ -46,6 +46,10 @@ def read_jsonl(path):
     return [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
 
 
+def read_inbox_events(tmp_path, day="2026-06-21"):
+    return read_jsonl(tmp_path / "memory" / "inbox" / "events" / f"{day}.jsonl")
+
+
 def git(tmp_path, *args):
     return subprocess.run(
         ["git", "-C", str(tmp_path / "memory"), *args],
@@ -70,7 +74,7 @@ class CodexMemoryCliTests(unittest.TestCase):
             self.tmp_path,
             "inbox",
             "append",
-            "--source",
+            "--type",
             "user_prompt",
             "--session-id",
             "sess-1",
@@ -78,6 +82,8 @@ class CodexMemoryCliTests(unittest.TestCase):
             "turn-1",
             "--cwd",
             str(project),
+            "--timestamp",
+            "2026-06-21T00:00:01+08:00",
             input_text="记住我喜欢短回答\n",
         )
 
@@ -89,11 +95,10 @@ class CodexMemoryCliTests(unittest.TestCase):
         self.assertIn("canonical/", payload["protocol"])
         self.assertFalse((self.tmp_path / "memory" / "index.md").exists())
 
-        inbox_file = self.tmp_path / "memory" / "inbox" / "user-prompts.jsonl"
-        entries = read_jsonl(inbox_file)
+        entries = read_inbox_events(self.tmp_path)
         self.assertEqual(len(entries), 1)
         self.assertEqual(entries[0]["id"], payload["id"])
-        self.assertEqual(entries[0]["source"], "user_prompt")
+        self.assertEqual(entries[0]["type"], "user_prompt")
         self.assertEqual(entries[0]["session_id"], "sess-1")
         self.assertEqual(entries[0]["codex_session_id"], "sess-1")
         self.assertEqual(entries[0]["turn_id"], "turn-1")
@@ -106,6 +111,7 @@ class CodexMemoryCliTests(unittest.TestCase):
         gitignore = (self.tmp_path / "memory" / ".gitignore").read_text(encoding="utf-8")
         self.assertIn("*", gitignore)
         self.assertIn("!/canonical/**", gitignore)
+        self.assertIn("!/inbox/events/**", gitignore)
         self.assertIn("!/system/extract-jobs.jsonl", gitignore)
 
     def test_workspace_key_reuses_project_agents_file(self):
@@ -122,7 +128,7 @@ class CodexMemoryCliTests(unittest.TestCase):
             self.tmp_path,
             "inbox",
             "append",
-            "--source",
+            "--type",
             "user_prompt",
             "--cwd",
             str(project),
@@ -130,7 +136,7 @@ class CodexMemoryCliTests(unittest.TestCase):
         )
 
         self.assertEqual(result.returncode, 0, result.stderr)
-        entries = read_jsonl(self.tmp_path / "memory" / "inbox" / "user-prompts.jsonl")
+        entries = read_jsonl(next((self.tmp_path / "memory" / "inbox" / "events").glob("*.jsonl")))
         self.assertEqual(entries[0]["workspace_key"], "readable-project")
         self.assertEqual(agents.read_text(encoding="utf-8").count("codex-agent-memory workspace-key"), 1)
 
@@ -139,7 +145,7 @@ class CodexMemoryCliTests(unittest.TestCase):
             self.tmp_path,
             "inbox",
             "append",
-            "--source",
+            "--type",
             "user_prompt",
             "--session-id",
             "local-session",
@@ -149,13 +155,40 @@ class CodexMemoryCliTests(unittest.TestCase):
         )
 
         self.assertEqual(result.returncode, 0, result.stderr)
-        entries = read_jsonl(self.tmp_path / "memory" / "inbox" / "user-prompts.jsonl")
+        entries = read_jsonl(next((self.tmp_path / "memory" / "inbox" / "events").glob("*.jsonl")))
         self.assertEqual(entries[0]["session_id"], "local-session")
         self.assertEqual(entries[0]["codex_session_id"], "codex-session-123")
 
+    def test_inbox_append_writes_assistant_message_jsonl(self):
+        result = run_cli(
+            self.tmp_path,
+            "inbox",
+            "append",
+            "--type",
+            "assistant_message",
+            "--phase",
+            "final_answer",
+            "--session-id",
+            "sess-1",
+            "--turn-id",
+            "turn-1",
+            "--timestamp",
+            "2026-06-21T00:00:01+08:00",
+            input_text="已完成源码修改，并通过测试。",
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        payload = json.loads(result.stdout)
+        self.assertTrue(payload["id"].startswith("am_"))
+        entries = read_inbox_events(self.tmp_path)
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0]["type"], "assistant_message")
+        self.assertEqual(entries[0]["phase"], "final_answer")
+        self.assertEqual(entries[0]["text"], "已完成源码修改，并通过测试。")
+
     def test_pending_entries_are_idempotent_against_processed_log(self):
-        first = run_cli(self.tmp_path, "inbox", "append", "--source", "user_prompt", input_text="one")
-        second = run_cli(self.tmp_path, "inbox", "append", "--source", "user_prompt", input_text="two")
+        first = run_cli(self.tmp_path, "inbox", "append", "--type", "user_prompt", input_text="one")
+        second = run_cli(self.tmp_path, "inbox", "append", "--type", "user_prompt", input_text="two")
         first_id = json.loads(first.stdout)["id"]
         second_id = json.loads(second.stdout)["id"]
 
@@ -169,9 +202,104 @@ class CodexMemoryCliTests(unittest.TestCase):
         pending = json.loads(result.stdout)
         self.assertEqual([entry["id"] for entry in pending], [second_id])
 
+    def test_pending_entries_include_assistant_messages(self):
+        user = run_cli(
+            self.tmp_path,
+            "inbox",
+            "append",
+            "--type",
+            "user_prompt",
+            "--timestamp",
+            "2026-06-21T00:00:01+08:00",
+            input_text="用户输入",
+        )
+        assistant = run_cli(
+            self.tmp_path,
+            "inbox",
+            "append",
+            "--type",
+            "assistant_message",
+            "--phase",
+            "final_answer",
+            "--timestamp",
+            "2026-06-21T00:00:02+08:00",
+            input_text="已完成动作",
+        )
+
+        self.assertEqual(user.returncode, 0, user.stderr)
+        self.assertEqual(assistant.returncode, 0, assistant.stderr)
+        result = run_cli(self.tmp_path, "inbox", "pending", "--json")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        pending = json.loads(result.stdout)
+        self.assertEqual([entry["type"] for entry in pending], ["user_prompt", "assistant_message"])
+
+    def test_collect_assistant_final_answers_from_session_log(self):
+        project = self.tmp_path / "project"
+        project.mkdir()
+        sessions_root = self.tmp_path / "codex" / "sessions"
+        session_file = sessions_root / "2026" / "06" / "21" / "rollout-2026-06-21T00-00-00-sess-1.jsonl"
+        session_file.parent.mkdir(parents=True)
+        rows = [
+            {
+                "timestamp": "2026-06-20T16:00:00.000Z",
+                "type": "session_meta",
+                "payload": {"id": "sess-1", "cwd": str(project)},
+            },
+            {
+                "timestamp": "2026-06-20T16:00:01.000Z",
+                "type": "event_msg",
+                "payload": {"type": "task_started", "turn_id": "turn-1"},
+            },
+            {
+                "timestamp": "2026-06-20T16:00:02.000Z",
+                "type": "event_msg",
+                "payload": {"type": "agent_message", "phase": "commentary", "message": "处理中"},
+            },
+            {
+                "timestamp": "2026-06-20T16:00:03.000Z",
+                "type": "event_msg",
+                "payload": {"type": "agent_message", "phase": "final_answer", "message": "已完成源码修改，并通过测试。"},
+            },
+        ]
+        session_file.write_text("".join(json.dumps(row, ensure_ascii=False) + "\n" for row in rows), encoding="utf-8")
+
+        first = run_cli(
+            self.tmp_path,
+            "inbox",
+            "collect-assistant-final",
+            "--sessions-root",
+            str(sessions_root),
+            "--turn-id",
+            "turn-1",
+        )
+        second = run_cli(
+            self.tmp_path,
+            "inbox",
+            "collect-assistant-final",
+            "--sessions-root",
+            str(sessions_root),
+            "--turn-id",
+            "turn-1",
+        )
+
+        self.assertEqual(first.returncode, 0, first.stderr)
+        self.assertEqual(second.returncode, 0, second.stderr)
+        self.assertEqual(json.loads(first.stdout)["collected"], 1)
+        self.assertEqual(json.loads(second.stdout)["collected"], 0)
+        entries = read_inbox_events(self.tmp_path)
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0]["type"], "assistant_message")
+        self.assertEqual(entries[0]["phase"], "final_answer")
+        self.assertEqual(entries[0]["session_id"], "sess-1")
+        self.assertEqual(entries[0]["turn_id"], "turn-1")
+        self.assertEqual(entries[0]["workspace_key"], "project")
+        self.assertEqual(entries[0]["text"], "已完成源码修改，并通过测试。")
+        self.assertTrue(entries[0]["ts"].endswith("+08:00"))
+
     def test_claim_batch_marks_entries_processing_and_prevents_reclaim(self):
-        first = run_cli(self.tmp_path, "inbox", "append", "--source", "user_prompt", input_text="one")
-        second = run_cli(self.tmp_path, "inbox", "append", "--source", "user_prompt", input_text="two")
+        first = run_cli(self.tmp_path, "inbox", "append", "--type", "user_prompt", input_text="one")
+        second = run_cli(self.tmp_path, "inbox", "append", "--type", "user_prompt", input_text="two")
         ids = [json.loads(first.stdout)["id"], json.loads(second.stdout)["id"]]
 
         claim = run_cli(self.tmp_path, "extract", "claim", "--limit", "10")
@@ -191,7 +319,7 @@ class CodexMemoryCliTests(unittest.TestCase):
         )
 
     def test_pending_ignores_processing_entries(self):
-        appended = run_cli(self.tmp_path, "inbox", "append", "--source", "user_prompt", input_text="one")
+        appended = run_cli(self.tmp_path, "inbox", "append", "--type", "user_prompt", input_text="one")
         entry_id = json.loads(appended.stdout)["id"]
         processed = self.tmp_path / "memory" / "system" / "processed.jsonl"
         processed.parent.mkdir(parents=True, exist_ok=True)
@@ -203,7 +331,7 @@ class CodexMemoryCliTests(unittest.TestCase):
         self.assertEqual(json.loads(result.stdout), [])
 
     def test_extract_dry_run_includes_memory_structure_contract(self):
-        run_cli(self.tmp_path, "inbox", "append", "--source", "user_prompt", input_text="remember a domain rule")
+        run_cli(self.tmp_path, "inbox", "append", "--type", "user_prompt", input_text="remember a domain rule")
 
         result = run_cli(self.tmp_path, "extract", "run", "--dry-run", "--limit", "1")
 
@@ -214,6 +342,8 @@ class CodexMemoryCliTests(unittest.TestCase):
         self.assertIn("先提炼背后的长期原则", result.stdout)
         self.assertIn("优先选择更通用且不失真的最宽作用域", result.stdout)
         self.assertIn("schema definitions, protocol contracts, configuration contracts", result.stdout)
+        self.assertIn("type=assistant_message 且 phase=final_answer", result.stdout)
+        self.assertIn("不要把方案设计建议", result.stdout)
         self.assertNotIn("prefer the narrower workspace path", result.stdout)
 
     def test_apply_plan_accepts_domain_memory_kind(self):
@@ -236,7 +366,11 @@ class CodexMemoryCliTests(unittest.TestCase):
         self.assertIn("Canonical memory is split", target.read_text())
 
     def test_stop_hook_is_disabled_by_default(self):
-        env = {**os.environ, "CODEX_AGENT_MEMORY_ROOT": str(self.tmp_path / "memory")}
+        env = {
+            **os.environ,
+            "CODEX_AGENT_MEMORY_ROOT": str(self.tmp_path / "memory"),
+            "CODEX_HOME": str(self.tmp_path / "codex"),
+        }
         env.pop("CODEX_AGENT_MEMORY_EXTRACT_ON_STOP", None)
         result = subprocess.run(
             [sys.executable, str(STOP_HOOK)],
@@ -249,6 +383,49 @@ class CodexMemoryCliTests(unittest.TestCase):
 
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout.strip(), "")
+
+    def test_stop_hook_collects_assistant_final_answer_when_extraction_is_disabled(self):
+        memory_root = self.tmp_path / "memory"
+        codex_home = self.tmp_path / "codex"
+        project = self.tmp_path / "project"
+        project.mkdir()
+        session_file = codex_home / "sessions" / "2026" / "06" / "21" / "rollout-2026-06-21T00-00-00-sess-1.jsonl"
+        session_file.parent.mkdir(parents=True)
+        rows = [
+            {"timestamp": "2026-06-20T16:00:00.000Z", "type": "session_meta", "payload": {"id": "sess-1", "cwd": str(project)}},
+            {"timestamp": "2026-06-20T16:00:01.000Z", "type": "event_msg", "payload": {"type": "task_started", "turn_id": "turn-1"}},
+            {
+                "timestamp": "2026-06-20T16:00:02.000Z",
+                "type": "event_msg",
+                "payload": {"type": "agent_message", "phase": "final_answer", "message": "已完成 hook 采集。"},
+            },
+        ]
+        session_file.write_text("".join(json.dumps(row, ensure_ascii=False) + "\n" for row in rows), encoding="utf-8")
+        env = {
+            **os.environ,
+            "CODEX_AGENT_MEMORY_ROOT": str(memory_root),
+            "CODEX_HOME": str(codex_home),
+            "CODEX_AGENT_MEMORY_DEBUG": "1",
+        }
+        env.pop("CODEX_AGENT_MEMORY_EXTRACT_ON_STOP", None)
+
+        result = subprocess.run(
+            [sys.executable, str(STOP_HOOK)],
+            input=json.dumps({"hook_event_name": "Stop", "turn_id": "turn-1"}),
+            text=True,
+            capture_output=True,
+            env=env,
+            check=False,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        entries = read_jsonl(memory_root / "inbox" / "events" / "2026-06-21.jsonl")
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0]["type"], "assistant_message")
+        self.assertEqual(entries[0]["text"], "已完成 hook 采集。")
+        rows = read_jsonl(memory_root / "system" / "hook-flow.jsonl")
+        self.assertEqual(rows[0]["assistant_collect_returncode"], 0)
+        self.assertFalse(rows[0]["extract_on_stop"])
 
     def test_stop_hook_starts_async_extraction_when_enabled(self):
         fake_bin = self.tmp_path / "fake-bin"
@@ -265,6 +442,8 @@ class CodexMemoryCliTests(unittest.TestCase):
         env = {
             **os.environ,
             "PATH": f"{fake_bin}:{os.environ.get('PATH', '')}",
+            "CODEX_AGENT_MEMORY_ROOT": str(self.tmp_path / "memory"),
+            "CODEX_HOME": str(self.tmp_path / "codex"),
             "CODEX_AGENT_MEMORY_EXTRACT_ON_STOP": "1",
             "CODEX_AGENT_MEMORY_EXTRACT_LIMIT": "7",
         }
@@ -353,7 +532,7 @@ class CodexMemoryCliTests(unittest.TestCase):
         self.assertEqual(by_id["job-3"]["status"], "failed")
 
     def test_extract_run_uses_configured_model_effort_and_last_message_output(self):
-        run_cli(self.tmp_path, "inbox", "append", "--source", "user_prompt", input_text="记住我喜欢中文")
+        run_cli(self.tmp_path, "inbox", "append", "--type", "user_prompt", input_text="记住我喜欢中文")
         fake_codex = self.tmp_path / "fake-codex.py"
         argv_path = self.tmp_path / "fake-codex-argv.json"
         fake_codex.write_text(
@@ -391,7 +570,7 @@ class CodexMemoryCliTests(unittest.TestCase):
 
     def test_extract_run_commits_memory_changes_to_git(self):
         entry_id = json.loads(
-            run_cli(self.tmp_path, "inbox", "append", "--source", "user_prompt", input_text="记住我喜欢中文").stdout
+            run_cli(self.tmp_path, "inbox", "append", "--type", "user_prompt", input_text="记住我喜欢中文").stdout
         )["id"]
         fake_codex = self.tmp_path / "fake-codex.py"
         fake_codex.write_text(
@@ -415,7 +594,7 @@ class CodexMemoryCliTests(unittest.TestCase):
 
     def test_extract_run_untracks_ignored_job_logs_before_commit(self):
         entry_id = json.loads(
-            run_cli(self.tmp_path, "inbox", "append", "--source", "user_prompt", input_text="记住我喜欢中文").stdout
+            run_cli(self.tmp_path, "inbox", "append", "--type", "user_prompt", input_text="记住我喜欢中文").stdout
         )["id"]
         fake_codex = self.tmp_path / "fake-codex.py"
         fake_codex.write_text(
@@ -436,7 +615,7 @@ class CodexMemoryCliTests(unittest.TestCase):
         self.assertIn("system/extract-jobs/old.stderr.log", git(self.tmp_path, "ls-files").stdout)
 
         second_id = json.loads(
-            run_cli(self.tmp_path, "inbox", "append", "--source", "user_prompt", input_text="记住我喜欢直接回答").stdout
+            run_cli(self.tmp_path, "inbox", "append", "--type", "user_prompt", input_text="记住我喜欢直接回答").stdout
         )["id"]
         fake_codex.write_text(
             "#!/usr/bin/env python3\n"
@@ -451,7 +630,7 @@ class CodexMemoryCliTests(unittest.TestCase):
         self.assertNotIn("system/extract-jobs/old.stderr.log", git(self.tmp_path, "ls-files").stdout)
 
     def test_extract_run_skips_when_job_lock_is_held(self):
-        run_cli(self.tmp_path, "inbox", "append", "--source", "user_prompt", input_text="one")
+        run_cli(self.tmp_path, "inbox", "append", "--type", "user_prompt", input_text="one")
         lock_path = self.tmp_path / "memory" / "system" / "locks" / "extract-job.lock"
         lock_path.parent.mkdir(parents=True, exist_ok=True)
         with lock_path.open("w", encoding="utf-8") as handle:
@@ -468,8 +647,8 @@ class CodexMemoryCliTests(unittest.TestCase):
         self.assertEqual(len(pending), 1)
 
     def test_extract_run_batches_entries_by_character_budget_without_splitting_entries(self):
-        first = json.loads(run_cli(self.tmp_path, "inbox", "append", "--source", "user_prompt", input_text="a" * 80).stdout)["id"]
-        second = json.loads(run_cli(self.tmp_path, "inbox", "append", "--source", "user_prompt", input_text="b" * 80).stdout)["id"]
+        first = json.loads(run_cli(self.tmp_path, "inbox", "append", "--type", "user_prompt", input_text="a" * 80).stdout)["id"]
+        second = json.loads(run_cli(self.tmp_path, "inbox", "append", "--type", "user_prompt", input_text="b" * 80).stdout)["id"]
         fake_codex = self.tmp_path / "fake-codex.py"
         calls_path = self.tmp_path / "calls.jsonl"
         fake_codex.write_text(
@@ -502,7 +681,7 @@ class CodexMemoryCliTests(unittest.TestCase):
 
     def test_extract_run_marks_single_oversized_entry_failed_without_splitting(self):
         entry_id = json.loads(
-            run_cli(self.tmp_path, "inbox", "append", "--source", "user_prompt", input_text="x" * 500).stdout
+            run_cli(self.tmp_path, "inbox", "append", "--type", "user_prompt", input_text="x" * 500).stdout
         )["id"]
         fake_codex = self.tmp_path / "fake-codex.py"
         fake_codex.write_text("#!/usr/bin/env python3\nraise SystemExit(99)\n", encoding="utf-8")
@@ -525,7 +704,7 @@ class CodexMemoryCliTests(unittest.TestCase):
         self.assertEqual(processed[-1]["reason"], "entry_exceeds_max_batch_chars")
 
     def test_extract_failure_job_log_stores_error_summary_not_full_stderr(self):
-        run_cli(self.tmp_path, "inbox", "append", "--source", "user_prompt", input_text="记住测试失败摘要")
+        run_cli(self.tmp_path, "inbox", "append", "--type", "user_prompt", input_text="记住测试失败摘要")
         fake_codex = self.tmp_path / "fake-codex.py"
         fake_codex.write_text(
             "#!/usr/bin/env python3\n"
@@ -599,6 +778,7 @@ class CodexMemoryCliTests(unittest.TestCase):
         env = {
             **os.environ,
             "CODEX_AGENT_MEMORY_ROOT": str(memory_root),
+            "CODEX_HOME": str(self.tmp_path / "codex"),
             "CODEX_AGENT_MEMORY_DEBUG": "1",
         }
         env.pop("CODEX_AGENT_MEMORY_EXTRACT_ON_STOP", None)
@@ -667,7 +847,7 @@ class CodexMemoryCliTests(unittest.TestCase):
         )
 
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertFalse((memory_root / "inbox" / "user-prompts.jsonl").exists())
+        self.assertFalse((memory_root / "inbox" / "events").exists())
         rows = read_jsonl(memory_root / "system" / "hook-flow.jsonl")
         self.assertEqual(rows[0]["status"], "filtered")
         self.assertEqual(rows[0]["filter_reason"], "hook_prompt_injection")
@@ -688,6 +868,7 @@ class CodexMemoryCliTests(unittest.TestCase):
             **os.environ,
             "PATH": f"{fake_bin}:{os.environ.get('PATH', '')}",
             "CODEX_AGENT_MEMORY_ROOT": str(memory_root),
+            "CODEX_HOME": str(self.tmp_path / "codex"),
             "CODEX_AGENT_MEMORY_DEBUG": "1",
             "CODEX_AGENT_MEMORY_EXTRACT_ON_STOP": "1",
             "CODEX_AGENT_MEMORY_INTERNAL_EXTRACT": "1",
@@ -712,7 +893,7 @@ class CodexMemoryCliTests(unittest.TestCase):
 
         self.assertEqual(user_prompt.returncode, 0, user_prompt.stderr)
         self.assertEqual(stop.returncode, 0, stop.stderr)
-        self.assertFalse((memory_root / "inbox" / "user-prompts.jsonl").exists())
+        self.assertFalse((memory_root / "inbox" / "events").exists())
         self.assertFalse(called.exists())
         rows = read_jsonl(memory_root / "system" / "hook-flow.jsonl")
         self.assertEqual([row["hook"] for row in rows], ["UserPromptSubmit", "Stop"])
@@ -724,7 +905,7 @@ class CodexMemoryCliTests(unittest.TestCase):
             self.tmp_path,
             "inbox",
             "append",
-            "--source",
+            "--type",
             "user_prompt",
             input_text="direct launcher",
         )
@@ -754,7 +935,7 @@ class CodexMemoryCliTests(unittest.TestCase):
         self.assertTrue(os.access(installed, os.X_OK))
 
         launched = subprocess.run(
-            [str(installed), "inbox", "append", "--source", "user_prompt"],
+            [str(installed), "inbox", "append", "--type", "user_prompt"],
             input="installed launcher",
             text=True,
             capture_output=True,
@@ -784,7 +965,7 @@ class CodexMemoryCliTests(unittest.TestCase):
         self.assertTrue(installed.exists())
 
         launched = subprocess.run(
-            [str(installed), "inbox", "append", "--source", "user_prompt"],
+            [str(installed), "inbox", "append", "--type", "user_prompt"],
             input="copy launcher",
             text=True,
             capture_output=True,
