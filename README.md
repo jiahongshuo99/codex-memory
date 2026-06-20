@@ -6,14 +6,26 @@ All source code lives inside this plugin. The CLI is plain Python plus a small s
 
 ## Shape
 
+The full memory directory contract lives in [assets/memory-structure.md](assets/memory-structure.md). Extraction prompts include that document so memory extraction agents see the same structure and routing rules.
+
 ```text
 ~/.codex/codex-agent-memory/
   index.md
+
   inbox/user-prompts.jsonl
-  canonical/user/
-  canonical/workspaces/
+
+  canonical/
+    user/
+    engineering/
+    workspaces/<workspace-key>/
+    domains/<domain-key>/
+
   system/checkpoint.json
   system/processed.jsonl
+  system/extraction-rules.md
+  system/locks/
+
+  tmp/
 ```
 
 ## Flow
@@ -202,4 +214,5 @@ codex-memory extract run --dry-run --limit 50
 - Inbox is JSONL, not markdown.
 - The hook does not retrieve memory.
 - Assistant messages are not recorded.
-- Canonical memory should contain durable user preferences, user boundaries, and reusable engineering standards, not one-off cases.
+- Canonical memory is split into `user`, `engineering`, `workspaces`, and `domains`; see [assets/memory-structure.md](assets/memory-structure.md).
+- Canonical memory should contain durable user preferences, user boundaries, reusable engineering standards, workspace-specific facts, or domain knowledge, not one-off cases.

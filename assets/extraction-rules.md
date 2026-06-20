@@ -2,6 +2,13 @@
 
 Extract only durable memory with high future reuse value.
 
+Before choosing a `target_file`, follow `assets/memory-structure.md`. Canonical memory is split into four modules:
+
+- `canonical/user/`
+- `canonical/engineering/`
+- `canonical/workspaces/<workspace-key>/`
+- `canonical/domains/<domain-key>/`
+
 ## User Memory
 
 Keep:
@@ -21,7 +28,8 @@ Do not keep:
 Keep:
 
 - Reusable engineering judgment standards.
-- Project or workspace workflows that are expected to apply repeatedly.
+- Cross-project engineering workflows and standards.
+- Project or workspace workflows that are expected to apply repeatedly within that workspace.
 - Testing, review, release, and style standards.
 - Gotchas that are general enough to prevent future repeated mistakes.
 
@@ -31,6 +39,18 @@ Do not keep:
 - Narrow business facts.
 - Specific implementation details from a temporary case.
 - Current code state unless it is a stable project convention.
+
+## Domain Memory
+
+Keep:
+
+- Durable concepts, rules, decisions, and gotchas for a subject area that is not tied to one workspace.
+- Product or architecture decisions that may apply across multiple future tasks in the same domain.
+
+Do not keep:
+
+- Topic notes that only explain the current conversation.
+- Domain claims that are weak inferences rather than explicit or well-supported decisions.
 
 ## Output Schema
 
@@ -67,3 +87,14 @@ Allowed `kind` values:
 - `engineering_workflow`
 - `engineering_standard`
 - `engineering_gotcha`
+- `engineering_stack_decision`
+- `workspace_overview`
+- `workspace_principle`
+- `workspace_workflow`
+- `workspace_standard`
+- `workspace_stack`
+- `workspace_gotcha`
+- `domain_concept`
+- `domain_rule`
+- `domain_decision`
+- `domain_gotcha`

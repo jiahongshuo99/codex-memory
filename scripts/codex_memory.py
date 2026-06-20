@@ -26,6 +26,17 @@ ALLOWED_KINDS = {
     "engineering_workflow",
     "engineering_standard",
     "engineering_gotcha",
+    "engineering_stack_decision",
+    "workspace_overview",
+    "workspace_principle",
+    "workspace_workflow",
+    "workspace_standard",
+    "workspace_stack",
+    "workspace_gotcha",
+    "domain_concept",
+    "domain_rule",
+    "domain_decision",
+    "domain_gotcha",
 }
 ALLOWED_OPERATIONS = {"append_bullet"}
 PROTOCOL_TEMPLATE = (
@@ -324,9 +335,11 @@ def command_plan_apply(args: argparse.Namespace) -> int:
 
 
 def extraction_prompt(entries: List[Dict[str, Any]], root: Path) -> str:
+    structure = read_plugin_asset("memory-structure.md")
     rules_path = root / "system" / "extraction-rules.md"
-    rules = rules_path.read_text(encoding="utf-8") if rules_path.exists() else DEFAULT_EXTRACTION_RULES
+    rules = rules_path.read_text(encoding="utf-8") if rules_path.exists() else read_plugin_asset("extraction-rules.md")
     return (
+        f"{structure}\n\n"
         f"{rules}\n\n"
         "Return only JSON with top-level keys `candidates` and `ignored`.\n"
         "Each candidate must use operation `append_bullet` and a target_file under canonical/.\n\n"
@@ -335,18 +348,11 @@ def extraction_prompt(entries: List[Dict[str, Any]], root: Path) -> str:
     )
 
 
-DEFAULT_EXTRACTION_RULES = """# Extraction Rules
-
-Extract only durable memory with high future reuse value.
-
-Keep:
-- Explicit user collaboration preferences, boundaries, and stable background.
-- Durable engineering principles, workflows, standards, and reusable gotchas.
-
-Do not keep:
-- One-off cases, narrow business facts, temporary task details, assistant messages, or weak inferences.
-- Sensitive personal information unless the user explicitly asks to remember it.
-"""
+def read_plugin_asset(name: str) -> str:
+    path = Path(__file__).resolve().parents[1] / "assets" / name
+    if path.exists():
+        return path.read_text(encoding="utf-8")
+    return ""
 
 
 def command_extract_run(args: argparse.Namespace) -> int:

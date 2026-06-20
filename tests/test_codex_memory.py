@@ -133,6 +133,37 @@ class CodexMemoryCliTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(json.loads(result.stdout), [])
 
+    def test_extract_dry_run_includes_memory_structure_contract(self):
+        run_cli(self.tmp_path, "inbox", "append", "--source", "user_prompt", input_text="remember a domain rule")
+
+        result = run_cli(self.tmp_path, "extract", "run", "--dry-run", "--limit", "1")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("Codex Agent Memory Structure", result.stdout)
+        self.assertIn("canonical/domains/<domain-key>/", result.stdout)
+
+    def test_apply_plan_accepts_domain_memory_kind(self):
+        plan = {
+            "candidates": [
+                {
+                    "kind": "domain_decision",
+                    "target_file": "canonical/domains/agent-memory/decisions.md",
+                    "operation": "append_bullet",
+                    "content": "Canonical memory is split into user, engineering, workspaces, and domains.",
+                    "source_ids": ["up_domain_1"],
+                    "confidence": "high",
+                    "reason": "explicit structure decision",
+                }
+            ],
+            "ignored": [],
+        }
+
+        result = run_cli(self.tmp_path, "plan", "apply", "--stdin", input_text=json.dumps(plan))
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        target = self.tmp_path / "memory" / "canonical" / "domains" / "agent-memory" / "decisions.md"
+        self.assertIn("Canonical memory is split", target.read_text())
+
     def test_stop_hook_is_disabled_by_default(self):
         env = {**os.environ, "CODEX_AGENT_MEMORY_ROOT": str(self.tmp_path / "memory")}
         result = subprocess.run(

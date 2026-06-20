@@ -7,6 +7,8 @@ description: Use when a task may benefit from durable user preferences, user con
 
 This skill uses a local, text-first memory store managed by the `codex-memory` CLI.
 
+The full memory directory contract is in `assets/memory-structure.md` in this plugin. Use that contract when deciding whether a memory belongs under `canonical/user`, `canonical/engineering`, `canonical/workspaces/<workspace-key>`, or `canonical/domains/<domain-key>`.
+
 ## Memory Root
 
 Default root:
@@ -69,7 +71,9 @@ Keep:
 - Explicit user collaboration preferences.
 - Explicit user boundaries and permission preferences.
 - Stable user background that is clearly useful.
-- Reusable engineering principles, workflows, standards, and gotchas.
+- Reusable cross-project engineering principles, workflows, standards, stack decisions, and gotchas.
+- Workspace-specific facts and workflows under the matching workspace key.
+- Durable domain concepts, rules, decisions, and gotchas under the matching domain key.
 
 Do not keep:
 
